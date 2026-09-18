@@ -48,27 +48,41 @@ The panel reflects what it can do:
 
 | | |
 |---|---|
-| `Mark 19 tests viewed` | there is work to do |
-| `✓ All 19 tests viewed` | nothing to do, so there is no button |
+| **19** Mark tests viewed | there is work to do |
+| **19** All tests viewed *(greyed out)* | everything already viewed |
 | `loading… 8/48` | GitHub is still streaming the diff in |
-| `no test files` | nothing in this pull request matches |
+| No test files *(greyed out)* | nothing in this pull request matches |
+
+The count sits in a badge on the button, and the button greys out when there is
+nothing to press. It is disabled with `aria-disabled` rather than the `disabled`
+attribute: both look the same in GitHub's styling, but a truly disabled button
+leaves the tab order and swallows the hover that shows its tooltip — losing the
+explanation of why it cannot be pressed, exactly when it is wanted.
 
 You can press the button while the diff is still loading. GitHub renders large
 diffs in batches over several seconds, so the script waits for files that have
 not appeared yet instead of stopping at whatever is on screen. **Undo** reverses
 the files that run touched, and nothing else.
 
+### Appearance
+
+The buttons borrow GitHub's own styling rather than imitating it: the
+`prc-Button-*` classes are read off a real button on the page at runtime, and
+the cog is cloned from GitHub's diff settings button. Those class names carry
+build hashes that change whenever GitHub rebuilds, which is exactly why they are
+read from the page instead of written down here.
+
 ### Settings
 
-The chevron next to the button opens a small menu. Settings are stored by the
-user script manager, so they survive a reload and a site-data wipe, and they
-apply on every repository.
+The cog next to the button opens a small menu. Settings are stored by the user
+script manager, so they survive a reload and a site-data wipe, and they apply on
+every repository.
 
-- **Also skip factories and seeders** — treats `Database/Factories`, `Seeders`
-  and `Seeds` as tests too. Off by default, since those are test *support* and
+- **Count factories and seeders as tests** — includes `Database/Factories`,
+  `Seeders` and `Seeds`. Off by default, since those are test *support* and
   worth a look more often than a test is.
-- **Collapse fully viewed folders** — folds away sidebar folders in which every
-  file is viewed, so the tree shrinks to what is left to read.
+- **Fold away finished folders** — collapses sidebar folders in which every file
+  is viewed, so the tree shrinks to what is left to read.
 
 GitHub does not remember a folded tree, so the folding is worked out again on
 every load from what is viewed — which GitHub *does* remember — rather than
@@ -76,8 +90,8 @@ stored. Open a folder by hand and it stays open, along with everything inside
 it, for the rest of the session. Switching the setting off unfolds everything
 the script folded.
 
-The chevron sits outside the main button on purpose: the button disappears once
-everything is viewed, and the settings have to stay reachable.
+The cog sits outside the main button on purpose: the button is disabled once
+everything is viewed, and changing what counts as a test has to stay reachable.
 
 ### Which files count as tests
 
@@ -89,8 +103,8 @@ common PHP and JavaScript conventions:
 - `phpunit.xml`, `codeception.yml`, `*.suite.yml`
 - `cypress/`
 
-Edit that list to match your own layout. There is a commented-out pattern for
-skipping factories and seeders too.
+Edit that list to match your own layout. Factories and seeders are not a pattern
+to uncomment any more — they are a setting in the cog menu.
 
 ## Updating
 

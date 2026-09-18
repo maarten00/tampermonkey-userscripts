@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GitHub: mark test files as viewed
 // @namespace    https://github.com/maarten00
-// @version      3.3.0
-// @description  Adds a button to a GitHub pull request diff that marks every test file as viewed, leaving only the real code to review.
+// @version      3.6.0
+// @description  Cuts a GitHub pull request diff down to what you actually need to read: marks test files as viewed and folds away finished folders.
 // @author       maarten00
 // @license      MIT
 // @homepageURL  https://github.com/maarten00/tampermonkey-userscripts
@@ -22,6 +22,9 @@
      * Configuration
      * ------------------------------------------------------------------ */
 
+    let startedAt = Date.now();
+    let lastPath = null;
+
     const CONFIG = {
         clickDelayMs: 250,      // Pause between toggles; GitHub throttles rapid-fire requests.
         scrollSettleMs: 400,    // Time given to the lazy-loaded diff to render after scrolling.
@@ -29,6 +32,7 @@
         maxRuntimeMs: 300000,
         settleWindowMs: 1500,   // Fallback only: how long the count must hold steady when no total is known.
         stallTimeoutMs: 15000,  // Give up waiting for stragglers; rendering can pause for seconds.
+        anchorGraceMs: 8000,    // How long to wait for the toolbar before floating the panel instead.
     };
 
     /* ------------------------------------------------------------------ *
@@ -570,13 +574,13 @@
     const MENU_OPTIONS = [
         {
             key: 'skipFactories',
-            label: 'Also skip factories and seeders',
-            hint: 'Counts Database/Factories, Seeders and Seeds as tests.',
+            label: 'Count factories and seeders as tests',
+            hint: 'Includes Database/Factories, Seeders and Seeds when marking files viewed.',
         },
         {
             key: 'collapseViewedDirs',
-            label: 'Collapse fully viewed folders',
-            hint: 'Folds away sidebar folders where every file is viewed. Reapplied on reload, since GitHub does not remember it.',
+            label: 'Fold away finished folders',
+            hint: 'Collapses sidebar folders in which every file is viewed. Reapplied on reload, since GitHub forgets it.',
         },
     ];
 
@@ -603,27 +607,33 @@
                 animation: tm-spin 0.7s linear infinite;
             }
             #${PANEL_ID} [hidden] { display: none !important; }
-            #${PANEL_ID} .tm-state {
-                display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
-                color: var(--fgColor-muted, #59636e);
-            }
-            #${PANEL_ID} .tm-state.tm-complete { color: var(--fgColor-success, #1a7f37); }
-            #${PANEL_ID} .tm-state .tm-check { font-weight: 700; }
             #${PANEL_ID} .tm-menu-wrap { position: relative; display: inline-flex; }
-            #${PANEL_ID} .tm-chevron { padding: 3px 6px; line-height: 1; }
+            #${PANEL_ID} .tm-count {
+                display: inline-block; min-width: 16px; padding: 2px 6px; border-radius: 20px;
+                font-size: 12px; font-weight: 600; line-height: 12px; text-align: center;
+                background: var(--bgColor-neutral-muted, rgba(129, 139, 152, .12));
+            }
             #${PANEL_ID} .tm-menu {
                 position: absolute; top: calc(100% + 4px); right: 0; z-index: 2147483000;
-                min-width: 232px; padding: 8px; text-align: left;
+                min-width: 252px; padding: 8px; text-align: left;
+                font: 400 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                color: var(--fgColor-default, #1f2328);
                 background: var(--overlay-bgColor, var(--bgColor-default, #ffffff));
                 border: 1px solid var(--borderColor-default, #d1d9e0);
                 border-radius: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, .15);
             }
+            #${PANEL_ID} .tm-menu-heading {
+                padding: 2px 2px 6px; font-weight: 600; font-size: 12px;
+                border-bottom: 1px solid var(--borderColor-muted, #d1d9e0); margin-bottom: 6px;
+            }
             #${PANEL_ID} .tm-menu label {
                 display: flex; gap: 8px; align-items: flex-start; cursor: pointer; padding: 4px 2px;
+                font-weight: 400;   /* GitHub bolds labels in this part of the page. */
             }
             #${PANEL_ID} .tm-menu input { margin: 2px 0 0; flex: none; }
             #${PANEL_ID} .tm-menu .tm-hint {
-                display: block; margin-top: 1px; color: var(--fgColor-muted, #59636e);
+                display: block; margin-top: 1px; font-size: 11px; font-weight: 400;
+                color: var(--fgColor-muted, #59636e);
             }
             @keyframes tm-spin { to { transform: rotate(360deg); } }
             @media (prefers-reduced-motion: reduce) {
@@ -717,7 +727,11 @@
 
     /** Places the controls beside the counter, falling back to the toolbar, then to a corner. */
     function mount(container) {
-        const counter = findCounterElement();
+        // Re-use the known anchor while it lives: searching for it again scans
+        // the whole document, and re-attaching needs to be cheap.
+        const counter = mountedCounter && document.body.contains(mountedCounter)
+            ? mountedCounter
+            : findCounterElement();
         if (counter?.parentElement) {
             const widget = counterWidget(counter);
             widget.parentElement.insertBefore(container, widget);
@@ -733,6 +747,13 @@
             }
         }
 
+        // Nothing to anchor to yet. Early in a load that only means the toolbar
+        // has not rendered, so wait rather than dropping the panel in a corner
+        // it would then be stuck in.
+        if (Date.now() - startedAt < CONFIG.anchorGraceMs) {
+            return null;
+        }
+
         Object.assign(container.style, {
             position: 'fixed', bottom: '16px', right: '16px', zIndex: '2147483000', padding: '8px',
             background: 'var(--bgColor-default, #ffffff)',
@@ -741,6 +762,136 @@
         });
 
         return 'floating';
+    }
+
+    const BUTTON_REF = '[data-component="Button"][data-size="small"]';
+    const ICON_BUTTON_REF = '[data-component="IconButton"][data-size="small"]';
+
+    const FALLBACK_BUTTON_STYLE = 'padding: 3px 10px; font: inherit; font-weight: 600; cursor: pointer;'
+        + ' white-space: nowrap; color: var(--fgColor-default, #1f2328);'
+        + ' background: var(--bgColor-muted, #f6f8fa);'
+        + ' border: 1px solid var(--borderColor-default, #d1d9e0); border-radius: 6px;';
+
+    /**
+     * GitHub's own button styling, borrowed rather than reproduced. Only the
+     * prc-Button-* classes are taken — the rest of a button's class list is
+     * particular to where it sits — and they are read off the page instead of
+     * hard-coded, because the hashes change whenever GitHub rebuilds.
+     */
+    function primerClasses(selector) {
+        const reference = document.querySelector(selector);
+        const classes = reference
+            ? [...reference.classList].filter((name) => name.startsWith('prc-Button-'))
+            : [];
+
+        return classes.length > 0 ? classes.join(' ') : null;
+    }
+
+    const innerClass = (part) => document.querySelector(`${BUTTON_REF} [data-component="${part}"]`)?.className || null;
+
+    /**
+     * GitHub's counter pill, for the number in front of the label. The variant
+     * meant for use inside a button is tried first and queried separately: a
+     * comma-separated selector returns whichever matches earliest in the
+     * document, not whichever selector was listed first.
+     */
+    function counterClasses() {
+        const reference = document.querySelector('[class*="prc-Button-CounterLabel"]')
+            || document.querySelector('[class*="prc-CounterLabel"]');
+
+        const classes = reference
+            ? [...reference.classList].filter((name) => name.includes('CounterLabel'))
+            : [];
+
+        return classes.length > 0 ? classes.join(' ') : null;
+    }
+
+    /** The cog, copied from the diff settings button so it always matches. */
+    function gearIcon() {
+        const octicon = document.querySelector('svg.octicon-gear');
+        if (octicon) {
+            return octicon.cloneNode(true);
+        }
+
+        const fallback = document.createElement('span');
+        fallback.textContent = '⚙';
+        return fallback;
+    }
+
+    function createButton({ label, icon }) {
+        const button = document.createElement('button');
+        button.type = 'button';
+
+        const base = primerClasses(icon ? ICON_BUTTON_REF : BUTTON_REF);
+        if (base) {
+            button.className = base;
+            button.setAttribute('data-component', icon ? 'IconButton' : 'Button');
+            button.setAttribute('data-size', 'small');
+            button.setAttribute('data-variant', 'default');
+        } else {
+            button.style.cssText = FALLBACK_BUTTON_STYLE;
+        }
+
+        if (icon) {
+            button.append(gearIcon());
+            return button;
+        }
+
+        const contentClass = innerClass('buttonContent');
+        const labelClass = innerClass('text');
+
+        const content = document.createElement('span');
+        content.setAttribute('data-component', 'buttonContent');
+        content.className = contentClass || '';
+
+        const counter = document.createElement('span');
+        counter.dataset.role = 'count';
+        counter.className = counterClasses() || 'tm-count';
+        counter.hidden = true;
+
+        const text = document.createElement('span');
+        text.setAttribute('data-component', 'text');
+        text.className = labelClass || '';
+        text.textContent = label;
+
+        content.append(counter, text);
+        button.append(content);
+
+        return button;
+    }
+
+    function setButtonCount(button, count) {
+        const counter = button.querySelector('[data-role="count"]');
+        if (!counter) {
+            return;
+        }
+
+        counter.hidden = count === null;
+        if (count !== null) {
+            counter.textContent = String(count);
+        }
+    }
+
+    /**
+     * aria-disabled rather than the disabled attribute: Primer styles both the
+     * same way, but a genuinely disabled button drops out of the tab order and
+     * swallows the hover that shows its tooltip — losing the explanation of why
+     * it cannot be pressed just when it is needed.
+     */
+    function setButtonDisabled(button, disabled) {
+        button.setAttribute('aria-disabled', String(disabled));
+    }
+
+    const isButtonDisabled = (button) => button.getAttribute('aria-disabled') === 'true';
+
+    /** Writes into the label span when there is one, so styling survives. */
+    function setButtonLabel(button, text) {
+        const label = button.querySelector('[data-component="text"]');
+        if (label) {
+            label.textContent = text;
+        } else {
+            button.textContent = text;
+        }
     }
 
     function buildPanel() {
@@ -752,14 +903,7 @@
             color: var(--fgColor-default, #1f2328); vertical-align: middle;
         `;
 
-        const buttonStyle = 'padding: 3px 10px; font: inherit; font-weight: 600; cursor: pointer;'
-            + ' white-space: nowrap; color: var(--fgColor-default, #1f2328);'
-            + ' background: var(--bgColor-muted, #f6f8fa);'
-            + ' border: 1px solid var(--borderColor-default, #d1d9e0); border-radius: 6px;';
-
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.style.cssText = buttonStyle;
+        const button = createButton({ label: 'Mark tests viewed' });
 
         const spinner = document.createElement('span');
         spinner.className = 'tm-spinner';
@@ -769,31 +913,26 @@
         status.setAttribute('aria-live', 'polite');
         status.style.cssText = 'color: var(--fgColor-muted, #59636e); white-space: nowrap;';
 
-        // Shown instead of the button whenever there is nothing to act on, so a
-        // dead control never sits there looking clickable.
-        const indicator = document.createElement('span');
-        indicator.className = 'tm-state';
-        indicator.setAttribute('role', 'status');
-        indicator.hidden = true;
 
         // The settings live outside the main button, which disappears whenever
         // there is nothing to mark; they have to stay reachable in every state.
         const menuWrap = document.createElement('span');
         menuWrap.className = 'tm-menu-wrap';
 
-        const chevron = document.createElement('button');
-        chevron.type = 'button';
-        chevron.className = 'tm-chevron';
-        chevron.textContent = '⌄';
-        chevron.title = 'Settings';
-        chevron.setAttribute('aria-label', 'Test file settings');
+        const chevron = createButton({ icon: true });
+        chevron.title = 'Diff settings';
+        chevron.setAttribute('aria-label', 'Open diff helper settings');
         chevron.setAttribute('aria-haspopup', 'true');
         chevron.setAttribute('aria-expanded', 'false');
-        chevron.style.cssText = buttonStyle + 'padding: 1px 7px 5px;';
 
         const menu = document.createElement('div');
         menu.className = 'tm-menu';
         menu.hidden = true;
+
+        const heading = document.createElement('div');
+        heading.className = 'tm-menu-heading';
+        heading.textContent = 'Diff settings';
+        menu.append(heading);
 
         for (const option of MENU_OPTIONS) {
             const label = document.createElement('label');
@@ -815,17 +954,29 @@
 
         menuWrap.append(chevron, menu);
 
-        const undo = document.createElement('button');
-        undo.type = 'button';
-        undo.textContent = 'Undo';
+        const undo = createButton({ label: 'Undo' });
         undo.hidden = true;
-        undo.style.cssText = buttonStyle;
 
         ensureStyle();
-        container.append(spinner, button, indicator, undo, status, menuWrap);
-        const placement = mount(container);
+        container.append(spinner, button, undo, status, menuWrap);
 
-        button.addEventListener('click', () => (state.running ? cancel() : start()));
+        const placement = mount(container);
+        if (placement === null) {
+            container.remove();
+            return { placement: null };
+        }
+
+        button.addEventListener('click', () => {
+            if (isButtonDisabled(button)) {
+                return;
+            }
+
+            if (state.running) {
+                cancel();
+            } else {
+                start();
+            }
+        });
         undo.addEventListener('click', undoRun);
 
         chevron.addEventListener('click', (event) => {
@@ -846,7 +997,7 @@
             }
         });
 
-        return { container, button, spinner, indicator, status, undo, menu, chevron, placement };
+        return { container, button, spinner, status, undo, menu, chevron, placement };
     }
 
     /**
@@ -883,33 +1034,27 @@
         elements.container.setAttribute('aria-busy', String(loading));
 
         const actionable = counts.tests > 0 && counts.pending > 0;
-        elements.button.hidden = !actionable;
-        elements.indicator.hidden = actionable;
+        setButtonDisabled(elements.button, !actionable);
 
         if (actionable) {
-            elements.button.textContent =
-                `Mark ${counts.pending} test${counts.pending === 1 ? '' : 's'} viewed`;
-            elements.button.title = `${counts.tests} of ${counts.total} files match the test patterns.`
+            setButtonCount(elements.button, counts.pending);
+            setButtonLabel(elements.button, 'Mark tests viewed');
+            elements.button.title = `${counts.tests} of ${counts.total} changed files match the test patterns.`
                 + (counts.pending < counts.tests ? `\n${counts.tests - counts.pending} already viewed.` : '')
-                + (loading ? `\n${counts.rendered} rendered so far; the sweep waits for the rest.` : '')
-                + '\nTicks GitHub\'s own "Viewed" toggle on each one.';
+                + (loading ? `\n${counts.rendered} loaded so far; the rest are waited for.` : '')
+                + '\nMarks each one with GitHub\'s own "Viewed" toggle.';
+        } else if (counts.tests > 0) {
+            setButtonCount(elements.button, counts.tests);
+            setButtonLabel(elements.button, 'All tests viewed');
+            elements.button.title = 'Every file matching the test patterns is already marked as viewed.'
+                + '\nUse the cog to change what counts as a test.';
         } else {
-            const complete = counts.tests > 0;
-            elements.indicator.classList.toggle('tm-complete', complete);
-            elements.indicator.textContent = '';
-
-            if (complete) {
-                const check = document.createElement('span');
-                check.className = 'tm-check';
-                check.textContent = '✓';
-                elements.indicator.append(check, document.createTextNode(
-                    ` All ${counts.tests} test${counts.tests === 1 ? '' : 's'} viewed`,
-                ));
-                elements.indicator.title = 'Every file matching the test patterns is already marked as viewed.';
-            } else {
-                elements.indicator.textContent = loading ? 'checking for tests…' : 'no test files';
-                elements.indicator.title = `None of the ${counts.total} changed files match the test patterns.`;
-            }
+            setButtonCount(elements.button, null);
+            setButtonLabel(elements.button, loading ? 'Checking for tests…' : 'No test files');
+            elements.button.title = loading
+                ? 'Still waiting for GitHub to load the file list.'
+                : `None of the ${counts.total} changed files match the test patterns.`
+                    + '\nUse the cog to change what counts as a test.';
         }
 
         // A finished run's summary holds until there is something new to do.
@@ -942,9 +1087,9 @@
 
         if (busy) {
             elements.spinner.hidden = true;
-            elements.indicator.hidden = true;
-            elements.button.hidden = false;
-            elements.button.textContent = 'Cancel';
+            setButtonDisabled(elements.button, false);
+            setButtonCount(elements.button, null);
+            setButtonLabel(elements.button, 'Cancel');
         } else {
             refreshCount();
         }
@@ -1025,6 +1170,11 @@
     const onDiffPage = () => /\/pull\/\d+\/(files|changes)\b/.test(location.pathname);
 
     function ensureUi() {
+        if (location.pathname !== lastPath) {
+            lastPath = location.pathname;
+            startedAt = Date.now();
+        }
+
         if (payloadCache.pr && !location.pathname.includes(`/pull/${payloadCache.pr}/`)) {
             payloadCache = { pr: null, files: null };
         }
@@ -1035,9 +1185,15 @@
             return;
         }
 
-        if (!elements || !document.body.contains(elements.container)) {
+        if (elements && !document.body.contains(elements.container)) {
+            // React re-rendered the toolbar and took the panel with it. Putting
+            // the same node straight back keeps its state and avoids the blink
+            // that rebuilding on the next debounce would cause.
+            elements.placement = mount(elements.container);
+        } else if (!elements) {
             document.getElementById(PANEL_ID)?.remove();
-            elements = buildPanel();
+            const built = buildPanel();
+            elements = built.placement === null ? null : built;
         }
 
         refreshCount();
@@ -1045,6 +1201,12 @@
 
     let debounce = null;
     new MutationObserver(() => {
+        // Re-attachment is checked on every batch, unthrottled: a debounce here
+        // is exactly how long the panel would be missing from the page.
+        if (elements && !document.body.contains(elements.container) && onDiffPage()) {
+            elements.placement = mount(elements.container);
+        }
+
         clearTimeout(debounce);
         debounce = setTimeout(ensureUi, 300);
     }).observe(document.body, { childList: true, subtree: true });
