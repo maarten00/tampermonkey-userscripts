@@ -6,6 +6,7 @@ Each one is a single self-contained file: no build step, no dependencies.
 | Script | What it does |
 |--------|--------------|
 | [GitHub: mark test files as viewed](github-mark-test-files-viewed.user.js) | Adds a button to a pull request diff that ticks every test file as *viewed*, leaving only the real code to review. |
+| [GitHub: collapse pull request labels](github-collapse-pr-labels.user.js) | Folds the labels on a pull request list into one small count, so the titles line up. Click the count to see a row's labels. |
 
 ## Install
 
@@ -105,6 +106,35 @@ common PHP and JavaScript conventions:
 
 Edit that list to match your own layout. Factories and seeders are not a pattern
 to uncomment any more — they are a setting in the cog menu.
+
+## GitHub: collapse pull request labels
+
+Every label on a pull request list is repeated on nearly every row, and between
+them they push the titles out of line and off the edge. This folds a row's
+labels into a single chip — a tag icon and a count — sitting where they were:
+
+| | |
+|---|---|
+| `🏷 3` | three labels, folded away |
+| `🏷 3` *(blue)* | that row is showing its labels |
+| `🏷 3` *(red)* | one of them is a **hotfix** |
+
+Click the chip to show that row's labels, click it again to fold them back.
+Alt-click shows every row at once, and Alt-click again folds them all. Hovering
+gives the label names without opening anything.
+
+A red chip is the exception to folding: something you want to see *before* you
+unfold a row. Which labels earn it is the `ALERT_PATTERNS` list at the top of
+the script — `hotfix` out of the box.
+
+Nothing is remembered between page loads. Folded is the point of the script, so
+every visit starts folded, and a row you opened stays open only as long as you
+are on that list — filtering, sorting and paging keep it.
+
+Labels are hidden by a stylesheet rule that matches GitHub's own markup rather
+than by the script reaching into each row. Rows stream in a batch at a time and
+React re-renders them as it pleases; a rule that is already in the page hides
+them on first paint, instead of letting them flash into view and then vanish.
 
 ## Updating
 
