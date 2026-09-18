@@ -136,6 +136,19 @@ than by the script reaching into each row. Rows stream in a batch at a time and
 React re-renders them as it pleases; a rule that is already in the page hides
 them on first paint, instead of letting them flash into view and then vanish.
 
+## Why both scripts match all of github.com
+
+A user script is injected when a document loads, and GitHub only loads one when
+you arrive from outside the site. Every step within it — a repository's Pull
+requests tab, a pull request, its Files tab, a filter, the next page — is a
+`pushState` away, and injects nothing. A script matched on the page it decorates
+therefore never runs for anyone who clicked their way there, which is how anyone
+normally gets there.
+
+So both scripts match `https://github.com/*`, are running long before the page
+they care about appears, and decide for themselves whether they are on it —
+tidying up after themselves when a click takes the reader somewhere else.
+
 ## Updating
 
 Scripts declare `@updateURL`, so Tampermonkey checks for new versions by itself.

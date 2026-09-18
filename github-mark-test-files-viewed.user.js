@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: mark test files as viewed
 // @namespace    https://github.com/maarten00
-// @version      3.6.0
+// @version      3.6.1
 // @description  Cuts a GitHub pull request diff down to what you actually need to read: marks test files as viewed and folds away finished folders.
 // @author       maarten00
 // @license      MIT
@@ -9,7 +9,7 @@
 // @supportURL   https://github.com/maarten00/tampermonkey-userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/maarten00/tampermonkey-userscripts/main/github-mark-test-files-viewed.user.js
 // @downloadURL  https://raw.githubusercontent.com/maarten00/tampermonkey-userscripts/main/github-mark-test-files-viewed.user.js
-// @match        https://github.com/*/*/pull/*
+// @match        https://github.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @run-at       document-idle
@@ -1165,6 +1165,13 @@
 
     /* ------------------------------------------------------------------ *
      * Wiring into GitHub's client-side navigation
+     *
+     * A user script is injected when a document loads, and GitHub only loads
+     * one when you arrive from outside the site. Opening a pull request from
+     * the list, or its Files tab from the pull request, is a pushState away
+     * and injects nothing. Hence the match on the whole of github.com: the
+     * script has to already be running by the time the diff appears, and
+     * ensureUi decides for itself whether the page is one of its own.
      * ------------------------------------------------------------------ */
 
     const onDiffPage = () => /\/pull\/\d+\/(files|changes)\b/.test(location.pathname);
@@ -1209,7 +1216,7 @@
 
         clearTimeout(debounce);
         debounce = setTimeout(ensureUi, 300);
-    }).observe(document.body, { childList: true, subtree: true });
+    }).observe(document.documentElement, { childList: true, subtree: true });
 
     window.addEventListener('popstate', ensureUi);
     document.addEventListener('turbo:load', ensureUi);

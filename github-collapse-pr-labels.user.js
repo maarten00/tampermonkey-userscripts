@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: collapse pull request labels
 // @namespace    https://github.com/maarten00
-// @version      1.0.0
+// @version      1.0.1
 // @description  Folds the labels on a pull request list into one small count, so the titles line up again. Click the count to see that row's labels.
 // @author       maarten00
 // @license      MIT
@@ -9,7 +9,7 @@
 // @supportURL   https://github.com/maarten00/tampermonkey-userscripts/issues
 // @updateURL    https://raw.githubusercontent.com/maarten00/tampermonkey-userscripts/main/github-collapse-pr-labels.user.js
 // @downloadURL  https://raw.githubusercontent.com/maarten00/tampermonkey-userscripts/main/github-collapse-pr-labels.user.js
-// @match        https://github.com/*/*/pulls*
+// @match        https://github.com/*
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==
@@ -41,6 +41,14 @@
     const STYLE_ID = 'tm-collapse-pr-labels-style';
     const CHIP_CLASS = 'tm-label-chip';
     const OPEN_ATTR = 'data-tm-labels';
+
+    /**
+     * A repository's own pull request list, and nothing else. The script is
+     * matched against the whole of github.com — see the navigation section at
+     * the foot of this file — so every page it does not belong on is turned
+     * away here instead.
+     */
+    const onListPage = () => /^\/[^/]+\/[^/]+\/pulls\/?$/.test(location.pathname);
 
     /* ------------------------------------------------------------------ *
      * What is open
@@ -271,6 +279,22 @@
 
     function sync() {
         ensureStyle();
+
+        if (!onListPage()) {
+            // Labels trail a title elsewhere on GitHub too — the issue list,
+            // for one — and the folding must not follow the reader there.
+            // GitHub leaves the old rows on screen while it fetches the next
+            // page, so the chips are taken out by hand rather than left to go
+            // down with them. Leaving also forgets which rows were open: come
+            // back to the list and it starts folded, as arriving on it does.
+            document.documentElement.classList.remove(ROOT_CLASS);
+            document.querySelectorAll(`.${CHIP_CLASS}`).forEach((chip) => chip.remove());
+            document.querySelectorAll(`[${OPEN_ATTR}]`).forEach((node) => node.removeAttribute(OPEN_ATTR));
+            opened.clear();
+            openAll = false;
+            return;
+        }
+
         document.documentElement.classList.add(ROOT_CLASS);
         document.querySelectorAll(BADGES).forEach(syncContainer);
     }
@@ -278,11 +302,18 @@
     /* ------------------------------------------------------------------ *
      * Wiring into GitHub's client-side navigation
      *
-     * Filtering, paging and sorting all replace the list without a page load,
-     * and rows stream in a batch at a time, so the only reliable signal is
-     * the DOM changing. The debounce keeps a burst of row renders down to one
-     * pass; the hiding rule is already in the stylesheet, so nothing shows
-     * through while it waits.
+     * A user script is injected when a document loads, and GitHub only loads
+     * one when you arrive from outside the site. Every step within it — the
+     * repository's Pull requests tab, a filter, a sort, the next page — is a
+     * pushState away, which injects nothing. Hence the match on the whole of
+     * github.com: the script has to already be running by the time the list
+     * appears, and decides for itself whether the page is one of its own.
+     *
+     * That leaves the DOM changing as the only dependable signal. popstate
+     * covers Back and Forward, turbo:load the navigations that announce
+     * themselves, and neither is enough on its own. The debounce keeps a burst
+     * of row renders down to one pass; the hiding rule is already in the
+     * stylesheet, so nothing shows through while it waits.
      * ------------------------------------------------------------------ */
 
     let debounce = null;
@@ -293,7 +324,12 @@
     }
 
     ensureStyle();
-    document.documentElement.classList.add(ROOT_CLASS);
+
+    // Before the first paint on a page loaded straight into the list, so the
+    // labels never flash into view.
+    if (onListPage()) {
+        document.documentElement.classList.add(ROOT_CLASS);
+    }
 
     new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
     window.addEventListener('popstate', schedule);
