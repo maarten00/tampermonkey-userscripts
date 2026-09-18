@@ -58,6 +58,19 @@ diffs in batches over several seconds, so the script waits for files that have
 not appeared yet instead of stopping at whatever is on screen. **Undo** reverses
 the files that run touched, and nothing else.
 
+### Settings
+
+The chevron next to the button opens a small menu. Settings are stored by the
+user script manager, so they survive a reload and a site-data wipe, and they
+apply on every repository.
+
+- **Also skip factories and seeders** — treats `Database/Factories`, `Seeders`
+  and `Seeds` as tests too. Off by default, since those are test *support* and
+  worth a look more often than a test is.
+
+The chevron sits outside the main button on purpose: the button disappears once
+everything is viewed, and the settings have to stay reachable.
+
 ### Which files count as tests
 
 The `TEST_PATTERNS` list at the top of the script decides. It ships with the

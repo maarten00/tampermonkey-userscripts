@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: mark test files as viewed
 // @namespace    https://github.com/maarten00
-// @version      3.1.0
+// @version      3.2.0
 // @description  Adds a button to a GitHub pull request diff that marks every test file as viewed, leaving only the real code to review.
 // @author       maarten00
 // @license      MIT
@@ -10,7 +10,8 @@
 // @updateURL    https://raw.githubusercontent.com/maarten00/tampermonkey-userscripts/main/github-mark-test-files-viewed.user.js
 // @downloadURL  https://raw.githubusercontent.com/maarten00/tampermonkey-userscripts/main/github-mark-test-files-viewed.user.js
 // @match        https://github.com/*/*/pull/*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -30,6 +31,70 @@
         stallTimeoutMs: 15000,  // Give up waiting for stragglers; rendering can pause for seconds.
     };
 
+    /* ------------------------------------------------------------------ *
+     * Settings
+     *
+     * Kept in the user script manager's own storage, so they survive a reload
+     * and even a site-data wipe. localStorage is only a fallback for managers
+     * that do not expose the GM API.
+     * ------------------------------------------------------------------ */
+
+    const STORAGE_PREFIX = 'mark-tests-viewed:';
+
+    const DEFAULTS = {
+        skipFactories: false,
+    };
+
+    const store = {
+        read(key, fallback) {
+            try {
+                if (typeof GM_getValue === 'function') {
+                    return GM_getValue(key, fallback);
+                }
+            } catch {
+                // Fall through to localStorage.
+            }
+
+            try {
+                return localStorage.getItem(STORAGE_PREFIX + key) ?? fallback;
+            } catch {
+                return fallback;
+            }
+        },
+        write(key, value) {
+            try {
+                if (typeof GM_setValue === 'function') {
+                    GM_setValue(key, value);
+                    return;
+                }
+            } catch {
+                // Fall through to localStorage.
+            }
+
+            try {
+                localStorage.setItem(STORAGE_PREFIX + key, value);
+            } catch {
+                // Nothing else to try; the setting lasts for this page only.
+            }
+        },
+    };
+
+    function loadSettings() {
+        try {
+            return { ...DEFAULTS, ...JSON.parse(store.read('settings', '{}')) };
+        } catch {
+            return { ...DEFAULTS };
+        }
+    }
+
+    let settings = loadSettings();
+
+    function updateSetting(key, value) {
+        settings = { ...settings, [key]: value };
+        store.write('settings', JSON.stringify(settings));
+        refreshCount();
+    }
+
     // A path is a test when it matches any of these.
     const TEST_PATTERNS = [
         /(^|\/)(tests?|integrationtests|unittests|featuretests|functionaltests|acceptancetests|browsertests|e2e|spec)\//i,
@@ -40,10 +105,22 @@
         /\.suite\.ya?ml$/,
         /(^|\/)(phpunit|codeception)[\w.]*\.(xml|ya?ml)(\.dist)?$/i,
         /(^|\/)cypress\//i,
-        // /(^|\/)Database\/(Factories|Seeders)\//,  // Enable to skip factories and seeders too.
     ];
 
-    const isTestPath = (path) => TEST_PATTERNS.some((pattern) => pattern.test(path));
+    // Test support rather than tests: close enough to skip, far enough that it
+    // is a choice. Toggled from the settings menu.
+    const OPTIONAL_PATTERNS = {
+        skipFactories: /(^|\/)Database\/(Factories|Seeders|Seeds)\//i,
+    };
+
+    function isTestPath(path) {
+        if (TEST_PATTERNS.some((pattern) => pattern.test(path))) {
+            return true;
+        }
+
+        return Object.entries(OPTIONAL_PATTERNS)
+            .some(([key, pattern]) => settings[key] && pattern.test(path));
+    }
 
     /* ------------------------------------------------------------------ *
      * Locating files in the diff
@@ -358,6 +435,14 @@
      * Panel
      * ------------------------------------------------------------------ */
 
+    const MENU_OPTIONS = [
+        {
+            key: 'skipFactories',
+            label: 'Also skip factories and seeders',
+            hint: 'Counts Database/Factories, Seeders and Seeds as tests.',
+        },
+    ];
+
     const PANEL_ID = 'tm-mark-tests-viewed';
     const STYLE_ID = 'tm-mark-tests-viewed-style';
     let elements = null;
@@ -387,6 +472,22 @@
             }
             #${PANEL_ID} .tm-state.tm-complete { color: var(--fgColor-success, #1a7f37); }
             #${PANEL_ID} .tm-state .tm-check { font-weight: 700; }
+            #${PANEL_ID} .tm-menu-wrap { position: relative; display: inline-flex; }
+            #${PANEL_ID} .tm-chevron { padding: 3px 6px; line-height: 1; }
+            #${PANEL_ID} .tm-menu {
+                position: absolute; top: calc(100% + 4px); right: 0; z-index: 2147483000;
+                min-width: 232px; padding: 8px; text-align: left;
+                background: var(--overlay-bgColor, var(--bgColor-default, #ffffff));
+                border: 1px solid var(--borderColor-default, #d1d9e0);
+                border-radius: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, .15);
+            }
+            #${PANEL_ID} .tm-menu label {
+                display: flex; gap: 8px; align-items: flex-start; cursor: pointer; padding: 4px 2px;
+            }
+            #${PANEL_ID} .tm-menu input { margin: 2px 0 0; flex: none; }
+            #${PANEL_ID} .tm-menu .tm-hint {
+                display: block; margin-top: 1px; color: var(--fgColor-muted, #59636e);
+            }
             @keyframes tm-spin { to { transform: rotate(360deg); } }
             @media (prefers-reduced-motion: reduce) {
                 #${PANEL_ID} .tm-spinner { animation-duration: 2.4s; }
@@ -514,14 +615,14 @@
             color: var(--fgColor-default, #1f2328); vertical-align: middle;
         `;
 
+        const buttonStyle = 'padding: 3px 10px; font: inherit; font-weight: 600; cursor: pointer;'
+            + ' white-space: nowrap; color: var(--fgColor-default, #1f2328);'
+            + ' background: var(--bgColor-muted, #f6f8fa);'
+            + ' border: 1px solid var(--borderColor-default, #d1d9e0); border-radius: 6px;';
+
         const button = document.createElement('button');
         button.type = 'button';
-        button.style.cssText = `
-            padding: 3px 10px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
-            color: var(--fgColor-default, #1f2328);
-            background: var(--bgColor-muted, #f6f8fa);
-            border: 1px solid var(--borderColor-default, #d1d9e0); border-radius: 6px;
-        `;
+        button.style.cssText = buttonStyle;
 
         const spinner = document.createElement('span');
         spinner.className = 'tm-spinner';
@@ -538,20 +639,77 @@
         indicator.setAttribute('role', 'status');
         indicator.hidden = true;
 
+        // The settings live outside the main button, which disappears whenever
+        // there is nothing to mark; they have to stay reachable in every state.
+        const menuWrap = document.createElement('span');
+        menuWrap.className = 'tm-menu-wrap';
+
+        const chevron = document.createElement('button');
+        chevron.type = 'button';
+        chevron.className = 'tm-chevron';
+        chevron.textContent = '⌄';
+        chevron.title = 'Settings';
+        chevron.setAttribute('aria-label', 'Test file settings');
+        chevron.setAttribute('aria-haspopup', 'true');
+        chevron.setAttribute('aria-expanded', 'false');
+        chevron.style.cssText = buttonStyle + 'padding: 1px 7px 5px;';
+
+        const menu = document.createElement('div');
+        menu.className = 'tm-menu';
+        menu.hidden = true;
+
+        for (const option of MENU_OPTIONS) {
+            const label = document.createElement('label');
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.checked = Boolean(settings[option.key]);
+            input.addEventListener('change', () => updateSetting(option.key, input.checked));
+
+            const text = document.createElement('span');
+            text.append(option.label);
+            const hint = document.createElement('small');
+            hint.className = 'tm-hint';
+            hint.textContent = option.hint;
+            text.append(hint);
+
+            label.append(input, text);
+            menu.append(label);
+        }
+
+        menuWrap.append(chevron, menu);
+
         const undo = document.createElement('button');
         undo.type = 'button';
         undo.textContent = 'Undo';
         undo.hidden = true;
-        undo.style.cssText = button.style.cssText;
+        undo.style.cssText = buttonStyle;
 
         ensureStyle();
-        container.append(spinner, button, indicator, undo, status);
+        container.append(spinner, button, indicator, undo, status, menuWrap);
         const placement = mount(container);
 
         button.addEventListener('click', () => (state.running ? cancel() : start()));
         undo.addEventListener('click', undoRun);
 
-        return { container, button, spinner, indicator, status, undo, placement };
+        chevron.addEventListener('click', (event) => {
+            event.stopPropagation();
+            toggleMenu(menu.hidden);
+        });
+
+        // A menu that only closes via its own button is a trap.
+        document.addEventListener('click', (event) => {
+            if (!menu.hidden && !menuWrap.contains(event.target)) {
+                toggleMenu(false);
+            }
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && !menu.hidden) {
+                toggleMenu(false);
+                chevron.focus();
+            }
+        });
+
+        return { container, button, spinner, indicator, status, undo, menu, chevron, placement };
     }
 
     /**
@@ -559,6 +717,11 @@
      * do, everything already viewed, or nothing to view at all. Only the second
      * one is a button, because only the second one does anything.
      */
+    function toggleMenu(open) {
+        elements.menu.hidden = !open;
+        elements.chevron.setAttribute('aria-expanded', String(open));
+    }
+
     function refreshCount() {
         if (!elements || state.running) {
             return;
