@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: mark test files as viewed
 // @namespace    https://github.com/maarten00
-// @version      3.2.0
+// @version      3.3.0
 // @description  Adds a button to a GitHub pull request diff that marks every test file as viewed, leaving only the real code to review.
 // @author       maarten00
 // @license      MIT
@@ -43,6 +43,7 @@
 
     const DEFAULTS = {
         skipFactories: false,
+        collapseViewedDirs: false,
     };
 
     const store = {
@@ -328,6 +329,137 @@
     }
 
     /* ------------------------------------------------------------------ *
+     * The file tree
+     *
+     * The sidebar is a Primer TreeView: each folder is a treeitem whose id is
+     * its path and whose chevron toggles it. GitHub forgets the folded state on
+     * every load, so it is derived again each time from what is viewed — which
+     * GitHub does remember — rather than stored.
+     * ------------------------------------------------------------------ */
+
+    const TREE_FOLDER = 'li[role="treeitem"][aria-expanded]';
+    const TREE_TOGGLE = '.PRIVATE_TreeView-item-toggle, [class*="item-toggle"]';
+
+    // Folders this script folded, so the setting can be switched back off, and
+    // folders the reader opened by hand, so it never fights them.
+    const autoCollapsed = new Set();
+    const keptExpanded = new Set();
+    let clickingTree = false;
+
+    /** Every file in the diff mapped to whether it is viewed; the DOM wins. */
+    function fileViewState() {
+        const viewed = new Map();
+
+        for (const file of payloadFiles() ?? []) {
+            viewed.set(file.path, file.viewed);
+        }
+        for (const file of scanFiles()) {
+            viewed.set(file.path, isViewed(file.control));
+        }
+
+        return viewed;
+    }
+
+    /** Clicks the chevron rather than the row, which would follow its link. */
+    function toggleFolder(folder) {
+        const toggle = folder.querySelector(TREE_TOGGLE);
+        if (!toggle) {
+            return false;
+        }
+
+        clickingTree = true;
+        try {
+            toggle.click();
+        } finally {
+            clickingTree = false;
+        }
+
+        return true;
+    }
+
+    const folderDepth = (folder) => folder.id.split('/').length;
+
+    /**
+     * True once the reader has opened this folder, or anything containing it, by
+     * hand. Folding the children of a folder somebody just opened to look inside
+     * would be the opposite of helpful.
+     */
+    function isKeptExpanded(id) {
+        return keptExpanded.has(id)
+            || [...keptExpanded].some((opened) => id.startsWith(`${opened}/`));
+    }
+
+    function collapseViewedFolders() {
+        const viewed = fileViewState();
+        if (viewed.size === 0) {
+            return;
+        }
+
+        // Shallowest first: folding a parent makes folding its children pointless.
+        const folders = [...document.querySelectorAll(`${TREE_FOLDER}[aria-expanded="true"]`)]
+            .filter((folder) => folder.id)
+            .sort((a, b) => folderDepth(a) - folderDepth(b));
+
+        const folded = [];
+
+        for (const folder of folders) {
+            if (isKeptExpanded(folder.id)) {
+                continue;
+            }
+            if (folded.some((done) => folder.id.startsWith(`${done}/`))) {
+                continue;
+            }
+
+            const prefix = `${folder.id}/`;
+            const contents = [...viewed].filter(([path]) => path.startsWith(prefix));
+
+            if (contents.length === 0 || contents.some(([, isSeen]) => !isSeen)) {
+                continue;
+            }
+
+            if (toggleFolder(folder)) {
+                autoCollapsed.add(folder.id);
+                folded.push(folder.id);
+            }
+        }
+    }
+
+    /** Puts the tree back the way it was when the setting is switched off. */
+    function expandAutoCollapsed() {
+        if (autoCollapsed.size === 0) {
+            return;
+        }
+
+        for (const folder of document.querySelectorAll(`${TREE_FOLDER}[aria-expanded="false"]`)) {
+            if (autoCollapsed.has(folder.id)) {
+                toggleFolder(folder);
+            }
+        }
+
+        autoCollapsed.clear();
+    }
+
+    function syncTree() {
+        if (settings.collapseViewedDirs) {
+            collapseViewedFolders();
+        } else {
+            expandAutoCollapsed();
+        }
+    }
+
+    // Anything the reader opens by hand stays open for the rest of the session.
+    document.addEventListener('click', (event) => {
+        if (clickingTree) {
+            return;
+        }
+
+        const item = event.target?.closest?.('li[role="treeitem"]');
+        if (item?.id && item.matches(TREE_FOLDER)) {
+            keptExpanded.add(item.id);
+        }
+    }, true);
+
+    /* ------------------------------------------------------------------ *
      * Scrolling
      * ------------------------------------------------------------------ */
 
@@ -440,6 +572,11 @@
             key: 'skipFactories',
             label: 'Also skip factories and seeders',
             hint: 'Counts Database/Factories, Seeders and Seeds as tests.',
+        },
+        {
+            key: 'collapseViewedDirs',
+            label: 'Collapse fully viewed folders',
+            hint: 'Folds away sidebar folders where every file is viewed. Reapplied on reload, since GitHub does not remember it.',
         },
     ];
 
@@ -794,6 +931,8 @@
         clearTimeout(scanState.timer);
         if (loading) {
             scanState.timer = setTimeout(refreshCount, 400);
+        } else {
+            syncTree();
         }
     }
 

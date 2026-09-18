@@ -67,6 +67,14 @@ apply on every repository.
 - **Also skip factories and seeders** — treats `Database/Factories`, `Seeders`
   and `Seeds` as tests too. Off by default, since those are test *support* and
   worth a look more often than a test is.
+- **Collapse fully viewed folders** — folds away sidebar folders in which every
+  file is viewed, so the tree shrinks to what is left to read.
+
+GitHub does not remember a folded tree, so the folding is worked out again on
+every load from what is viewed — which GitHub *does* remember — rather than
+stored. Open a folder by hand and it stays open, along with everything inside
+it, for the rest of the session. Switching the setting off unfolds everything
+the script folded.
 
 The chevron sits outside the main button on purpose: the button disappears once
 everything is viewed, and the settings have to stay reachable.
