@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: mark test files as viewed
 // @namespace    https://github.com/maarten00
-// @version      3.6.1
+// @version      3.7.0
 // @description  Cuts a GitHub pull request diff down to what you actually need to read: marks test files as viewed and folds away finished folders.
 // @author       maarten00
 // @license      MIT
@@ -28,6 +28,8 @@
     const CONFIG = {
         clickDelayMs: 250,      // Pause between toggles; GitHub throttles rapid-fire requests.
         scrollSettleMs: 400,    // Time given to the lazy-loaded diff to render after scrolling.
+        reflowSettleMs: 1500,   // GitHub collapses a diff only once the server confirms; the shift lands late.
+        pinFallbackMs: 100,     // Backstop for nudging the view back onto its anchor when frames stop coming.
         scrollStep: 0.6,        // Fraction of the viewport to advance per step.
         maxRuntimeMs: 300000,
         settleWindowMs: 1500,   // Fallback only: how long the count must hold steady when no total is known.
@@ -485,6 +487,93 @@
     const atBottom = (scroller) => scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4;
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+    /**
+     * Pins the reader's view in place for the length of a sweep.
+     *
+     * Toggling a file collapses or expands its diff, but only about a second
+     * later, once GitHub has heard back from the server. A file above the
+     * viewport then drags everything below it along by the full height of that
+     * diff, a thousand pixels at a time, and the browser's own scroll anchoring
+     * is no help: the diff list renders with content-visibility, so the
+     * elements it would anchor to are not rendered at all.
+     *
+     * So the file header the reader is looking at is remembered and put back on
+     * its pixel, over and over, for as long as the sweep runs. Correcting on
+     * its own schedule rather than after each click means the clicking never
+     * has to wait for a reflow that has not landed yet.
+     */
+    function pinView(scroller) {
+        const frameTop = scroller === document.scrollingElement || scroller === document.documentElement
+            ? 0
+            : scroller.getBoundingClientRect().top;
+        const scrollTop = scroller.scrollTop;
+
+        // The first header still on screen, or failing that the next one down;
+        // either way it moves exactly as much as the reader's view does.
+        function find() {
+            let found = null;
+
+            for (const node of document.querySelectorAll(FILE_HEADER)) {
+                const box = node.getBoundingClientRect();
+                found = { node, offset: box.top };
+                if (box.bottom > frameTop) {
+                    break;
+                }
+            }
+
+            return found;
+        }
+
+        function correctTo(target) {
+            if (!target) {
+                return;
+            }
+            if (!target.node.isConnected) {
+                scroller.scrollTop = scrollTop;
+                return;
+            }
+
+            const drift = target.node.getBoundingClientRect().top - target.offset;
+            if (drift) {
+                scroller.scrollTop += drift;
+            }
+        }
+
+        const home = find();
+        let anchor = home;
+        let live = true;
+
+        // Correcting inside an animation frame puts the view back before the
+        // shifted layout is ever painted, so the reader sees nothing move. A
+        // background tab stops painting altogether, and there the timer keeps
+        // it ticking over.
+        function schedule() {
+            let fired = false;
+
+            const run = () => {
+                if (fired || !live) {
+                    return;
+                }
+
+                fired = true;
+                clearTimeout(timer);
+                correctTo(anchor);
+                schedule();
+            };
+
+            const timer = setTimeout(run, CONFIG.pinFallbackMs);
+            requestAnimationFrame(run);
+        }
+
+        schedule();
+
+        return {
+            reset: () => { anchor = find(); },      // After a deliberate scroll, the new position is the one to hold.
+            stop: () => { live = false; },
+            restore: () => correctTo(home),
+        };
+    }
+
     /* ------------------------------------------------------------------ *
      * Sweeping the diff
      * ------------------------------------------------------------------ */
@@ -492,76 +581,100 @@
     const state = { running: false, cancelled: false, marked: [], resultText: '', resultPending: 0 };
 
     /**
-     * Scans, toggles and scrolls until every target has been dealt with.
+     * Scans and toggles until every target has been dealt with.
      *
      * Reaching the bottom is not the finish line: GitHub streams the diff in
      * over several seconds, so early on the page is short and most files simply
-     * do not exist yet. The sweep therefore waits at the bottom for stragglers
-     * to arrive and only gives up when nothing new has appeared for a while.
+     * do not exist yet. The sweep therefore waits for stragglers to arrive and
+     * only gives up when nothing new has appeared for a while.
+     *
+     * Scrolling is a last resort rather than the method. The current diff view
+     * puts every file in the page up front and hydrates the toggles by itself,
+     * so scrolling past them buys nothing and only throws the reader around.
+     * The classic view does render on scroll, so a round that turns up nothing
+     * new advances a step to shake the next batch loose. Whatever the sweep
+     * does move, it moves back when it is done.
      */
     async function sweep(desired, matches, onProgress, expected, minSeen) {
         const touched = new Set();
         const handled = new Set();
         const deadline = Date.now() + CONFIG.maxRuntimeMs;
         const scroller = getScroller();
+        const pin = pinView(scroller);
 
         const outstanding = () => (expected ? [...expected].filter((path) => !handled.has(path)).length : null);
 
         let lastProgressAt = Date.now();
-        let bottomStreak = 0;
+        let idleStreak = 0;
+        let scrolled = false;
 
-        scroller.scrollTop = 0;
-        await sleep(CONFIG.scrollSettleMs);
+        try {
+            while (Date.now() < deadline && !state.cancelled) {
+                let progressed = false;
 
-        while (Date.now() < deadline && !state.cancelled) {
-            let progressed = false;
+                for (const file of scanFiles()) {
+                    if (handled.has(file.path)) {
+                        continue;
+                    }
 
-            for (const file of scanFiles()) {
-                if (handled.has(file.path)) {
-                    continue;
+                    handled.add(file.path);
+                    progressed = true;
+
+                    if (!matches(file.path) || isViewed(file.control) === desired) {
+                        continue;
+                    }
+
+                    file.control.click();
+                    touched.add(file.path);
+                    onProgress(touched.size, outstanding());
+                    await sleep(CONFIG.clickDelayMs);
                 }
 
-                handled.add(file.path);
-                progressed = true;
+                // Done when every intended file is handled; without that list, when
+                // every file the diff promises has at least been seen.
+                const finished = expected
+                    ? outstanding() === 0
+                    : minSeen !== null && handled.size >= minSeen;
 
-                if (!matches(file.path) || isViewed(file.control) === desired) {
-                    continue;
-                }
-
-                file.control.click();
-                touched.add(file.path);
-                onProgress(touched.size, outstanding());
-                await sleep(CONFIG.clickDelayMs);
-            }
-
-            // Done when every intended file is handled; without that list, when
-            // every file the diff promises has at least been seen.
-            if (expected) {
-                if (outstanding() === 0) {
+                if (finished) {
                     break;
                 }
-            } else if (atBottom(scroller)) {
-                const seenEverything = minSeen !== null && handled.size >= minSeen;
-                if (seenEverything || (minSeen === null && bottomStreak >= 2)) {
-                    break;
+
+                if (progressed) {
+                    lastProgressAt = Date.now();
+                    idleStreak = 0;
+                } else {
+                    idleStreak++;
+
+                    if (Date.now() - lastProgressAt >= CONFIG.stallTimeoutMs) {
+                        break;
+                    }
+
+                    if (!atBottom(scroller)) {
+                        // Nothing arrived on its own, so this is the classic view:
+                        // it renders what has been scrolled past and nothing more.
+                        scrolled = true;
+                        scroller.scrollTop += Math.round(scroller.clientHeight * CONFIG.scrollStep);
+                        pin.reset();
+                    } else if (expected === null && minSeen === null && idleStreak >= 2) {
+                        break;      // Nothing left to scroll past and no total to wait for.
+                    }
                 }
+
+                await sleep(CONFIG.scrollSettleMs);
             }
 
-            if (progressed) {
-                lastProgressAt = Date.now();
-                bottomStreak = 0;
-            } else if (Date.now() - lastProgressAt >= CONFIG.stallTimeoutMs) {
-                break;
+            // The last few toggles are still waiting on the server, and their
+            // reflow has to be caught too before the pin is let go.
+            if (touched.size) {
+                await sleep(CONFIG.reflowSettleMs);
             }
+        } finally {
+            pin.stop();
+        }
 
-            if (atBottom(scroller)) {
-                bottomStreak++;     // Nothing left to scroll past; hold still and let the rest stream in.
-            } else {
-                bottomStreak = 0;
-                scroller.scrollTop += Math.round(scroller.clientHeight * CONFIG.scrollStep);
-            }
-
-            await sleep(CONFIG.scrollSettleMs);
+        if (scrolled) {
+            pin.restore();
         }
 
         return { touched: [...touched], missed: outstanding() ?? 0 };
