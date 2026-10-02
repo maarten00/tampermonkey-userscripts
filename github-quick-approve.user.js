@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: quick approve
 // @namespace    https://github.com/maarten00
-// @version      2.1.0
+// @version      2.1.1
 // @description  Adds an Approve button to every tab of a pull request. One click approves it, without opening the review dialog yourself.
 // @author       maarten00
 // @license      MIT
@@ -98,11 +98,15 @@
 
         // Only while idle: progress and failures are news, and an approval you
         // just made should read "Approved" once the message has run its course.
-        const done = state.label === LABEL && hasApproved();
+        const idle = state.label === LABEL;
+        const done = idle && hasApproved();
+        const checking = idle && isChecking();
 
         button.textContent = done ? 'Approved' : state.label;
-        button.title = done ? 'You have already approved this pull request.' : state.title;
-        button.setAttribute('aria-disabled', String(state.disabled || done));
+        button.title = done
+            ? 'You have already approved this pull request.'
+            : (checking ? 'Checking whether you have approved this pull request…' : state.title);
+        button.setAttribute('aria-disabled', String(state.disabled || done || checking));
     }
 
     function setState(label, { disabled = false, title = '' } = {}) {
@@ -129,62 +133,81 @@
      * that was dismissed no longer counts, and neither does one you replaced
      * with a request for changes.
      *
-     * Unknown is not the same as not approved: if the sidebar cannot be read,
-     * the button is left alone.
+     * Until that answer is in, the button is disabled: enabling it first and
+     * taking it away after the fact looks like a flicker, and a click in that
+     * gap would approve a second time. If the answer never comes — the sidebar
+     * cannot be read, GitHub is unreachable — the button is enabled, since an
+     * unknown state is not a reason to block approving.
      * ------------------------------------------------------------------ */
 
-    let approval = { key: null, approved: false };
+    // 'checking' until the sidebar has been read, then 'approved' or 'open'.
+    let approval = { key: null, status: 'open' };
     let lookup = Promise.resolve();
 
-    const hasApproved = () => approval.key !== null && approval.key === pullKey() && approval.approved;
+    const hasApproved = () => approval.key !== null && approval.key === pullKey() && approval.status === 'approved';
+    const isChecking = () => approval.key !== null && approval.key === pullKey() && approval.status === 'checking';
 
-    async function loadApproval(key) {
+    /** 'approved' or 'open', or null when the sidebar could not be read. */
+    async function readApproval(key) {
         const login = document.querySelector('meta[name="user-login"]')?.content?.toLowerCase();
         if (!login) {
-            return;
+            return null;
         }
 
         try {
             const response = await fetch(`/${key}`, { credentials: 'same-origin', headers: { Accept: 'text/html' } });
             if (!response.ok) {
-                return;
+                return null;
             }
 
             const form = new DOMParser().parseFromString(await response.text(), 'text/html').querySelector(REVIEWERS);
-            if (!form || key !== pullKey()) {
-                return;
+            if (!form) {
+                return null;
             }
 
-            approval = {
-                key,
-                approved: [...form.querySelectorAll('a[href]')]
-                    .filter((link) => link.getAttribute('href').toLowerCase() === `/${login}`)
-                    .some((link) => link.closest(REVIEWER_ROW)?.querySelector(APPROVED_ICON) !== null),
-            };
-            render();
+            const approved = [...form.querySelectorAll('a[href]')]
+                .filter((link) => link.getAttribute('href').toLowerCase() === `/${login}`)
+                .some((link) => link.closest(REVIEWER_ROW)?.querySelector(APPROVED_ICON) !== null);
+
+            return approved ? 'approved' : 'open';
         } catch (error) {
-            // Offline, or GitHub is having a moment: leave the button as it is.
+            return null;
         }
+    }
+
+    async function loadApproval(key) {
+        const status = await readApproval(key);
+
+        // Gone to another pull request while it was being read.
+        if (key !== pullKey()) {
+            return;
+        }
+
+        if (status !== null) {
+            approval = { key, status };
+        } else if (approval.status === 'checking') {
+            approval = { key, status: 'open' };
+        }
+
+        render();
     }
 
     function refreshApproval() {
         const key = pullKey();
 
         if (key === null) {
-            approval = { key: null, approved: false };
+            approval = { key: null, status: 'open' };
             return;
         }
 
+        // A pull request seen before keeps its answer while it is re-read, so
+        // coming back to the tab does not flash the button disabled.
         if (approval.key !== key) {
-            approval = { key, approved: false };
+            approval = { key, status: 'checking' };
         }
 
         lookup = loadApproval(key);
     }
-
-    /* ------------------------------------------------------------------ *
-     * Approving
-     * ------------------------------------------------------------------ */
 
     let busy = false;
 
@@ -284,7 +307,7 @@
                 return;
             }
 
-            approval = { key: pullKey(), approved: true };
+            approval = { key: pullKey(), status: 'approved' };
             report('Approved');
 
             // Back to the tab it was started from. Only on success: after a
@@ -357,6 +380,8 @@
         // Once per pull request; the focus listener below keeps it fresh.
         if (pullKey() !== approval.key) {
             refreshApproval();
+            // A button already on screen belongs to the previous pull request.
+            render();
         }
 
         const existing = document.getElementById(BUTTON_ID);

@@ -155,7 +155,9 @@ to — it says *Cannot approve*, hovering gives the reason, and you stay on File
 changed so you can see it. Nothing is sent in that case; the dialog is closed the
 way it was found.
 
-Once you have approved, the button greys out and reads *Approved*. It goes by
+The button starts greyed out while it checks whether you have already approved,
+then either turns on or reads *Approved*. If the check cannot be made, it turns
+on anyway. It goes by
 the reviewers list on the Conversation tab, so an approval that was dismissed —
 or that you replaced with a request for changes — does not count and the button
 comes back. That list is fetched in the background from whichever tab you are
