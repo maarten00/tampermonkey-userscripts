@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: quick approve
 // @namespace    https://github.com/maarten00
-// @version      2.1.1
+// @version      2.2.0
 // @description  Adds an Approve button to every tab of a pull request. One click approves it, without opening the review dialog yourself.
 // @author       maarten00
 // @license      MIT
@@ -33,6 +33,9 @@
     // The title row's actions (View status, Code), present on every tab.
     const HEADER_ACTIONS = '[class*="PageHeader-Actions"]';
     const TAB_NAV = 'nav[aria-label="Pull request navigation"]';
+    // "<author> wants to merge …", under the title on every tab; the author is
+    // the first link in it.
+    const AUTHOR_LINK = '[class*="PullRequestHeaderSummary"] a';
     // The Conversation tab's sidebar: one row per reviewer, an approving
     // review marked with a check. A dismissed approval loses it.
     const REVIEWERS = 'form.js-issue-sidebar-form[aria-label="Select reviewers"]';
@@ -47,7 +50,19 @@
     const WAIT_MS = 4000;
 
     const onPullPage = () => /^\/[^/]+\/[^/]+\/pull\/\d+(\/|$)/.test(location.pathname);
+    const currentLogin = () => document.querySelector('meta[name="user-login"]')?.content?.toLowerCase() ?? null;
     const pullKey = () => location.pathname.match(/^\/([^/]+\/[^/]+\/pull\/\d+)(?:\/|$)/)?.[1] ?? null;
+
+    /**
+     * Your own pull request cannot be approved by you. Where the author cannot
+     * be told — the header is still loading, or GitHub changed its markup —
+     * the answer is no, so the button errs on the side of being there.
+     */
+    function isOwnPull() {
+        const author = document.querySelector(AUTHOR_LINK)?.getAttribute('href')?.toLowerCase();
+        return author !== undefined && author === `/${currentLogin()}`;
+    }
+
     const onDiffPage = () => /^\/[^/]+\/[^/]+\/pull\/\d+\/(files|changes)\b/.test(location.pathname);
 
     /* ------------------------------------------------------------------ *
@@ -149,7 +164,7 @@
 
     /** 'approved' or 'open', or null when the sidebar could not be read. */
     async function readApproval(key) {
-        const login = document.querySelector('meta[name="user-login"]')?.content?.toLowerCase();
+        const login = currentLogin();
         if (!login) {
             return null;
         }
@@ -377,6 +392,13 @@
     }
 
     function sync() {
+        // No button on a pull request of your own, and no reason to look up
+        // whether you approved it.
+        if (isOwnPull()) {
+            document.getElementById(BUTTON_ID)?.remove();
+            return;
+        }
+
         // Once per pull request; the focus listener below keeps it fresh.
         if (pullKey() !== approval.key) {
             refreshApproval();
