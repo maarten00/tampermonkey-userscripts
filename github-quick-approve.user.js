@@ -2,7 +2,7 @@
 // @name         GitHub: quick approve
 // @namespace    https://github.com/maarten00
 // @version      2.0.0
-// @description  Adds an Approve button next to the review button on a pull request's Files changed tab. One click approves, without opening the review dialog yourself.
+// @description  Adds an Approve button to every tab of a pull request. One click approves it, without opening the review dialog yourself.
 // @author       maarten00
 // @license      MIT
 // @homepageURL  https://github.com/maarten00/tampermonkey-userscripts
@@ -30,6 +30,9 @@
     const REVIEW_BUTTON = '[class*="ReviewMenuButton"]';
     const APPROVE_RADIO = 'input[name="reviewEvent"][value="approve"]';
     const DIALOG = '[role="dialog"]';
+    // The title row's actions (View status, Code), present on every tab.
+    const HEADER_ACTIONS = '[class*="PageHeader-Actions"]';
+    const TAB_NAV = 'nav[aria-label="Pull request navigation"]';
 
     const BUTTON_ID = 'tm-quick-approve';
     const LABEL = 'Approve';
@@ -38,6 +41,7 @@
     // button to wake up once Approve is picked.
     const WAIT_MS = 4000;
 
+    const onPullPage = () => /^\/[^/]+\/[^/]+\/pull\/\d+(\/|$)/.test(location.pathname);
     const onDiffPage = () => /^\/[^/]+\/[^/]+\/pull\/\d+\/(files|changes)\b/.test(location.pathname);
 
     /* ------------------------------------------------------------------ *
@@ -70,45 +74,91 @@
         .find((button) => button.textContent.trim() === 'Cancel');
 
     /* ------------------------------------------------------------------ *
-     * Approving
+     * The button's state
+     *
+     * Kept outside the button: approving from another tab moves to Files
+     * changed, where the button is built afresh, and its progress has to
+     * survive the trip.
      * ------------------------------------------------------------------ */
 
-    let busy = false;
+    let state = { label: LABEL, title: '', disabled: false };
+    let resetTimer = null;
 
-    function setState(button, label, { disabled = false, title = '' } = {}) {
-        button.textContent = label;
-        button.title = title;
-        button.setAttribute('aria-disabled', String(disabled));
+    function render() {
+        const button = document.getElementById(BUTTON_ID);
+        if (!button) {
+            return;
+        }
+
+        button.textContent = state.label;
+        button.title = state.title;
+        button.setAttribute('aria-disabled', String(state.disabled));
+    }
+
+    function setState(label, { disabled = false, title = '' } = {}) {
+        clearTimeout(resetTimer);
+        state = { label, title, disabled };
+        render();
     }
 
     /**
      * Reports back on the button itself and reverts a moment later, rather than
      * raising a toast of its own: the button is already where the eye is.
      */
-    function report(button, label, title) {
-        setState(button, label, { title });
-        setTimeout(() => {
-            if (button.isConnected) {
-                setState(button, LABEL);
-            }
-        }, 3000);
+    function report(label, title) {
+        setState(label, { title });
+        resetTimer = setTimeout(() => setState(LABEL), 3000);
     }
 
-    async function approve(button) {
-        if (busy) {
-            return;
+    /* ------------------------------------------------------------------ *
+     * Approving
+     * ------------------------------------------------------------------ */
+
+    let busy = false;
+
+    /**
+     * The review button only exists on the Files changed tab, so from any
+     * other tab that is where the approval happens. GitHub's own tab link is
+     * clicked rather than the address changed: the page is not reloaded, and
+     * going back afterwards is an ordinary Back.
+     */
+    async function reachDiff() {
+        if (onDiffPage()) {
+            return false;
         }
 
-        const review = document.querySelector(REVIEW_BUTTON);
-        if (!review) {
-            report(button, 'No review button', 'GitHub has not shown its review button on this page.');
+        const link = [...document.querySelectorAll(`${TAB_NAV} a`)]
+            .find((anchor) => /\/pull\/\d+\/(files|changes)$/.test(anchor.getAttribute('href') ?? ''));
+
+        link?.click();
+
+        return link ? true : null;
+    }
+
+    async function approve() {
+        if (busy || !onPullPage()) {
             return;
         }
 
         busy = true;
-        setState(button, 'Approving…', { disabled: true });
+        setState('Approving…', { disabled: true });
+
+        let moved = false;
 
         try {
+            moved = await reachDiff();
+
+            if (moved === null) {
+                report('Could not approve', 'The Files changed tab was not found.');
+                return;
+            }
+
+            const review = await waitFor(() => (onDiffPage() ? document.querySelector(REVIEW_BUTTON) : null));
+            if (!review) {
+                report('Could not approve', 'GitHub did not show its review button.');
+                return;
+            }
+
             review.click();
 
             const dialog = await waitFor(() => {
@@ -117,7 +167,7 @@
             });
 
             if (!dialog) {
-                report(button, 'Could not approve', 'The review dialog did not open.');
+                report('Could not approve', 'The review dialog did not open.');
                 return;
             }
 
@@ -127,7 +177,7 @@
             // write access; the dialog is left the way it was found.
             if (isDisabled(radio)) {
                 dialogCancel(dialog)?.click();
-                report(button, 'Cannot approve', 'GitHub does not let you approve this pull request.');
+                report('Cannot approve', 'GitHub does not let you approve this pull request.');
                 return;
             }
 
@@ -140,14 +190,26 @@
 
             if (!submit) {
                 dialogCancel(dialog)?.click();
-                report(button, 'Could not approve', 'GitHub did not enable its submit button.');
+                report('Could not approve', 'GitHub did not enable its submit button.');
                 return;
             }
 
             submit.click();
 
             const closed = await waitFor(() => (dialog.isConnected ? null : true));
-            report(button, closed ? 'Approved' : 'Check the review', closed ? '' : 'The review dialog is still open.');
+
+            if (!closed) {
+                report('Check the review', 'The review dialog is still open.');
+                return;
+            }
+
+            report('Approved');
+
+            // Back to the tab it was started from. Only on success: after a
+            // failure the reader is left where the reason can be seen.
+            if (moved) {
+                history.back();
+            }
         } finally {
             busy = false;
         }
@@ -158,21 +220,19 @@
      * ------------------------------------------------------------------ */
 
     /**
-     * Dressed from the review button next to it, so it follows GitHub's styling
+     * Dressed from a real button beside it, so it follows GitHub's styling
      * through whatever Primer ships next. Only the prc-Button-* classes are
-     * taken; the rest of that list is layout for the review button alone.
+     * taken; the rest of that list is layout for that button alone.
      */
-    function createButton(review) {
+    function createButton(reference) {
         const button = document.createElement('button');
         button.id = BUTTON_ID;
         button.type = 'button';
-        button.className = [...review.classList].filter((name) => name.startsWith('prc-Button-')).join(' ');
+        button.className = [...reference.classList].filter((name) => name.startsWith('prc-Button-')).join(' ');
         button.dataset.component = 'Button';
-        button.dataset.size = review.dataset.size ?? 'small';
+        button.dataset.size = reference.dataset.size ?? 'small';
         button.dataset.variant = 'default';
-        button.style.marginRight = '8px';
         button.setAttribute('aria-live', 'polite');
-        setState(button, LABEL);
 
         // A disabled-looking button that still takes focus and shows its
         // tooltip, so the reason it cannot be pressed stays readable.
@@ -180,30 +240,58 @@
             event.preventDefault();
 
             if (button.getAttribute('aria-disabled') !== 'true') {
-                approve(button);
+                approve();
             }
         });
 
         return button;
     }
 
+    /**
+     * Where the button goes: beside the review button on the diff, where
+     * GitHub keeps it, and in the title row's actions on every other tab.
+     * Returns the element to put it in front of, or null if the page is not
+     * ready.
+     */
+    function findAnchor() {
+        if (!onPullPage()) {
+            return null;
+        }
+
+        if (onDiffPage()) {
+            const review = document.querySelector(REVIEW_BUTTON);
+            return review ? { before: review, reference: review, margin: true } : null;
+        }
+
+        const actions = document.querySelector(HEADER_ACTIONS);
+        const reference = actions?.querySelector('button[class*="prc-Button-"]');
+        // The first child that is not the button itself, or the button, once
+        // placed, would be its own anchor and be moved again on every pass.
+        const first = actions?.querySelector(`:scope > :not(#${BUTTON_ID})`);
+        return reference && first ? { before: first, reference, margin: false } : null;
+    }
+
     function sync() {
         const existing = document.getElementById(BUTTON_ID);
-        const review = onDiffPage() ? document.querySelector(REVIEW_BUTTON) : null;
+        const anchor = findAnchor();
 
         // GitHub keeps the old header on screen while the next page loads, so
-        // the button is taken out by hand when the reader leaves the diff.
-        if (!review) {
+        // the button is taken out by hand when the reader leaves a pull request.
+        if (!anchor) {
             existing?.remove();
             return;
         }
 
-        if (existing && existing.nextElementSibling === review) {
+        if (existing && existing.nextElementSibling === anchor.before) {
             return;
         }
 
         existing?.remove();
-        review.before(createButton(review));
+
+        const button = createButton(anchor.reference);
+        button.style.marginRight = anchor.margin ? '8px' : '';
+        anchor.before.before(button);
+        render();
     }
 
     /* ------------------------------------------------------------------ *

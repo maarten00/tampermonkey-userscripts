@@ -7,7 +7,7 @@ Each one is a single self-contained file: no build step, no dependencies.
 |--------|--------------|
 | [GitHub: mark test files as viewed](github-mark-test-files-viewed.user.js) | Adds a button to a pull request diff that ticks every test file as *viewed*, leaving only the real code to review. |
 | [GitHub: collapse pull request labels](github-collapse-pr-labels.user.js) | Folds the labels on a pull request list into one small count, so the titles line up. Click the count to see a row's labels. |
-| [GitHub: quick approve](github-quick-approve.user.js) | Adds an **Approve** button next to the review button on a pull request's Files changed tab. One click approves. |
+| [GitHub: quick approve](github-quick-approve.user.js) | Adds an **Approve** button to every tab of a pull request. One click approves, without a comment. |
 
 ## Install
 
@@ -139,22 +139,28 @@ them on first paint, instead of letting them flash into view and then vanish.
 
 ## GitHub: quick approve
 
-On a pull request's **Files changed** tab, an **Approve** button appears next to
-GitHub's own *Submit review* button. One click opens the review dialog, picks
-*Approve* and submits it — the same three steps you would do by hand.
+An **Approve** button on every tab of a pull request — Conversation, Commits,
+Checks and Files changed. One click approves it, with no comment. It sits next
+to GitHub's own *Submit review* button on Files changed, and in the title row
+beside *View status* and *Code* everywhere else.
+
+It presses GitHub's own buttons: open the review dialog, pick *Approve*, submit.
+The review dialog only exists on Files changed, so from another tab the script
+first switches there — through GitHub's own tab link, so nothing reloads — and
+returns you to the tab you started on once the approval has gone through.
 
 The button reports back on itself: *Approving…*, then *Approved*. If GitHub does
 not let you approve — your own pull request, or a repository you cannot write
-to — it says *Cannot approve* and hovering gives the reason. Nothing is sent in
-that case; the dialog is closed the way it was found.
+to — it says *Cannot approve*, hovering gives the reason, and you stay on Files
+changed so you can see it. Nothing is sent in that case; the dialog is closed the
+way it was found.
 
-There is nothing to set up. It presses GitHub's buttons, so it needs no token
-and cannot do anything you could not do yourself. Any text you have already
-typed into the review box goes along with the approval.
+There is nothing to set up: no token, no settings, and it cannot do anything you
+could not do yourself. Text already typed into the review box goes along with
+the approval.
 
-It only lives on the Files changed tab, because that is where GitHub puts the
-review button. Like the other scripts it dresses itself in the review button's
-own `prc-Button-*` classes, read off the page at runtime.
+Like the other scripts it takes its look from a real button beside it, reading
+the `prc-Button-*` classes off the page at runtime.
 
 ## Why the scripts match all of github.com
 
