@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GitHub: quick approve
 // @namespace    https://github.com/maarten00
-// @version      1.0.0
-// @description  Approve the pull request you are looking at with one keyboard shortcut (Alt+Shift+U, or Cmd+Shift+U on a Mac), without opening the review dialog.
+// @version      2.0.0
+// @description  Adds an Approve button next to the review button on a pull request's Files changed tab. One click approves, without opening the review dialog yourself.
 // @author       maarten00
 // @license      MIT
 // @homepageURL  https://github.com/maarten00/tampermonkey-userscripts
@@ -10,11 +10,8 @@
 // @updateURL    https://raw.githubusercontent.com/maarten00/tampermonkey-userscripts/main/github-quick-approve.user.js
 // @downloadURL  https://raw.githubusercontent.com/maarten00/tampermonkey-userscripts/main/github-quick-approve.user.js
 // @match        https://github.com/*
-// @connect      api.github.com
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_registerMenuCommand
-// @grant        GM_xmlhttpRequest
+// @grant        none
+// @run-at       document-idle
 // ==/UserScript==
 
 (function () {
@@ -23,271 +20,209 @@
     /* ------------------------------------------------------------------ *
      * Configuration
      *
-     * Approving goes through GitHub's REST API with a personal access token,
-     * not through the review form: the form needs a CSRF token and markup
-     * that GitHub rewrites at will, the API is a documented contract.
+     * The script presses GitHub's own buttons — open the review dialog, pick
+     * Approve, submit — so it needs no token and does nothing you could not
+     * do by hand. The class names carry build hashes, so everything matches
+     * on the stable part of the name or on the form's own field names.
      * ------------------------------------------------------------------ */
 
-    const API = 'https://api.github.com';
-    const API_VERSION = '2022-11-28';
+    // The "Submit review" / "Submit comments" button in the Files changed header.
+    const REVIEW_BUTTON = '[class*="ReviewMenuButton"]';
+    const APPROVE_RADIO = 'input[name="reviewEvent"][value="approve"]';
+    const DIALOG = '[role="dialog"]';
 
-    const KEY_TOKEN = 'token';
-    const KEY_SHORTCUT = 'shortcut';
-    const KEY_MESSAGE = 'message';
+    const BUTTON_ID = 'tm-quick-approve';
+    const LABEL = 'Approve';
 
-    const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
-    const DEFAULT_SHORTCUT = IS_MAC ? 'Meta+Shift+U' : 'Alt+Shift+U';
+    // How long to wait for GitHub's dialog to appear, and for its submit
+    // button to wake up once Approve is picked.
+    const WAIT_MS = 4000;
 
-    const TOAST_ID = 'tm-quick-approve-toast';
-    const TOAST_MS = 4000;
-
-    /**
-     * Any page of a pull request: Conversation, Commits, Checks, Files changed.
-     * Captures owner, repository and number.
-     */
-    const PULL_PAGE = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/;
+    const onDiffPage = () => /^\/[^/]+\/[^/]+\/pull\/\d+\/(files|changes)\b/.test(location.pathname);
 
     /* ------------------------------------------------------------------ *
-     * Shortcut
-     *
-     * Stored as text such as "Alt+Shift+U". Letters are matched on the
-     * physical key (event.code) rather than the character: Option on a Mac
-     * turns U into a dead key, and the character would never match.
+     * Waiting for the page
      * ------------------------------------------------------------------ */
 
-    const MODIFIERS = ['Ctrl', 'Alt', 'Shift', 'Meta'];
+    function waitFor(find, timeout = WAIT_MS) {
+        return new Promise((resolve) => {
+            const started = Date.now();
 
-    function parseShortcut(text) {
-        const parts = String(text ?? '').split('+').map((part) => part.trim()).filter(Boolean);
-        const key = parts.pop()?.toUpperCase();
-        const modifiers = parts.map((part) => MODIFIERS.find((name) => name.toLowerCase() === part.toLowerCase()));
+            (function poll() {
+                const found = find();
 
-        // Without a modifier the shortcut would fire while typing, and a
-        // misspelt modifier would silently be dropped.
-        if (!key || !/^[A-Z0-9]$/.test(key) || modifiers.length === 0 || modifiers.includes(undefined)) {
-            return null;
-        }
+                if (found || Date.now() - started > timeout) {
+                    resolve(found ?? null);
+                    return;
+                }
 
-        return { key, modifiers: new Set(modifiers) };
-    }
-
-    const readShortcut = () => parseShortcut(GM_getValue(KEY_SHORTCUT, DEFAULT_SHORTCUT))
-        ?? parseShortcut(DEFAULT_SHORTCUT);
-
-    function matches(event, shortcut) {
-        const code = /^\d$/.test(shortcut.key) ? `Digit${shortcut.key}` : `Key${shortcut.key}`;
-
-        return event.code === code
-            && event.ctrlKey === shortcut.modifiers.has('Ctrl')
-            && event.altKey === shortcut.modifiers.has('Alt')
-            && event.shiftKey === shortcut.modifiers.has('Shift')
-            && event.metaKey === shortcut.modifiers.has('Meta');
-    }
-
-    /** Typing a comment must never approve anything. */
-    function isTyping(target) {
-        return target instanceof Element
-            && (target.isContentEditable || target.closest('input, textarea, select, [contenteditable="true"]') !== null);
-    }
-
-    /* ------------------------------------------------------------------ *
-     * Toast
-     * ------------------------------------------------------------------ */
-
-    let toastTimer = null;
-
-    function toast(text, kind) {
-        let node = document.getElementById(TOAST_ID);
-
-        if (!node) {
-            node = document.createElement('div');
-            node.id = TOAST_ID;
-            node.setAttribute('role', 'status');
-            node.setAttribute('aria-live', 'polite');
-            node.style.cssText = [
-                'position: fixed', 'right: 16px', 'bottom: 16px', 'z-index: 2147483647',
-                'max-width: 360px', 'padding: 10px 14px',
-                'border: 1px solid transparent', 'border-radius: 6px',
-                'font: 14px/1.4 var(--fontStack-sansSerif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif)',
-                'box-shadow: var(--shadow-floating-small, 0 4px 12px rgba(0, 0, 0, .25))',
-            ].join(';');
-            document.body.appendChild(node);
-        }
-
-        const failed = kind === 'error';
-        const pending = kind === 'pending';
-
-        node.textContent = text;
-        node.style.color = failed ? 'var(--fgColor-danger, #d1242f)' : 'var(--fgColor-default, #1f2328)';
-        node.style.background = failed ? 'var(--bgColor-danger-muted, #ffebe9)' : 'var(--bgColor-default, #ffffff)';
-        node.style.borderColor = failed
-            ? 'var(--borderColor-danger-muted, #ff818266)'
-            : (kind === 'success' ? 'var(--borderColor-success-emphasis, #1a7f37)' : 'var(--borderColor-default, #d1d9e0)');
-
-        clearTimeout(toastTimer);
-        if (!pending) {
-            toastTimer = setTimeout(() => node.remove(), TOAST_MS);
-        }
-    }
-
-    /* ------------------------------------------------------------------ *
-     * GitHub API
-     * ------------------------------------------------------------------ */
-
-    /**
-     * GM_xmlhttpRequest rather than fetch: github.com's content security
-     * policy decides what the page may connect to, and the token has no
-     * business in page context anyway.
-     */
-    function api(method, path, token, body) {
-        return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                method,
-                url: `${API}${path}`,
-                headers: {
-                    Accept: 'application/vnd.github+json',
-                    Authorization: `Bearer ${token}`,
-                    'X-GitHub-Api-Version': API_VERSION,
-                    ...(body ? { 'Content-Type': 'application/json' } : {}),
-                },
-                data: body ? JSON.stringify(body) : undefined,
-                onload: (response) => {
-                    let json = {};
-                    try {
-                        json = JSON.parse(response.responseText);
-                    } catch (error) {
-                        // An empty or non-JSON body: the status says enough.
-                    }
-
-                    if (response.status >= 200 && response.status < 300) {
-                        resolve(json);
-                        return;
-                    }
-
-                    reject(new Error(json.message ?? `GitHub answered ${response.status}`));
-                },
-                onerror: () => reject(new Error('Could not reach api.github.com')),
-                ontimeout: () => reject(new Error('api.github.com did not answer in time')),
-            });
+                setTimeout(poll, 50);
+            })();
         });
     }
+
+    const isDisabled = (element) => element.disabled || element.getAttribute('aria-disabled') === 'true';
+
+    const dialogSubmit = (dialog) => [...dialog.querySelectorAll('button')]
+        .find((button) => button.dataset.variant === 'primary' && /^submit/i.test(button.textContent.trim()));
+
+    const dialogCancel = (dialog) => [...dialog.querySelectorAll('button')]
+        .find((button) => button.textContent.trim() === 'Cancel');
 
     /* ------------------------------------------------------------------ *
      * Approving
      * ------------------------------------------------------------------ */
 
-    let approving = false;
+    let busy = false;
 
-    async function approve() {
-        const match = location.pathname.match(PULL_PAGE);
-        if (!match || approving) {
-            return;
-        }
-
-        const token = GM_getValue(KEY_TOKEN, '');
-        if (!token) {
-            toast('Quick approve needs a GitHub token first.', 'error');
-            setToken();
-            return;
-        }
-
-        const [, owner, repo, number] = match;
-        const message = GM_getValue(KEY_MESSAGE, '');
-
-        approving = true;
-        toast(`Approving ${owner}/${repo}#${number}…`, 'pending');
-
-        try {
-            await api('POST', `/repos/${owner}/${repo}/pulls/${number}/reviews`, token, {
-                event: 'APPROVE',
-                ...(message ? { body: message } : {}),
-            });
-            toast(`Approved ${owner}/${repo}#${number}`, 'success');
-        } catch (error) {
-            toast(`Could not approve: ${error.message}`, 'error');
-        } finally {
-            approving = false;
-        }
+    function setState(button, label, { disabled = false, title = '' } = {}) {
+        button.textContent = label;
+        button.title = title;
+        button.setAttribute('aria-disabled', String(disabled));
     }
 
-    document.addEventListener('keydown', (event) => {
-        if (event.repeat || event.isComposing || isTyping(event.target)) {
+    /**
+     * Reports back on the button itself and reverts a moment later, rather than
+     * raising a toast of its own: the button is already where the eye is.
+     */
+    function report(button, label, title) {
+        setState(button, label, { title });
+        setTimeout(() => {
+            if (button.isConnected) {
+                setState(button, LABEL);
+            }
+        }, 3000);
+    }
+
+    async function approve(button) {
+        if (busy) {
             return;
         }
 
-        if (PULL_PAGE.test(location.pathname) && matches(event, readShortcut())) {
-            event.preventDefault();
-            approve();
+        const review = document.querySelector(REVIEW_BUTTON);
+        if (!review) {
+            report(button, 'No review button', 'GitHub has not shown its review button on this page.');
+            return;
         }
-    });
+
+        busy = true;
+        setState(button, 'Approving…', { disabled: true });
+
+        try {
+            review.click();
+
+            const dialog = await waitFor(() => {
+                const open = document.querySelector(DIALOG);
+                return open?.querySelector(APPROVE_RADIO) ? open : null;
+            });
+
+            if (!dialog) {
+                report(button, 'Could not approve', 'The review dialog did not open.');
+                return;
+            }
+
+            const radio = dialog.querySelector(APPROVE_RADIO);
+
+            // GitHub disables it for your own pull request and where you lack
+            // write access; the dialog is left the way it was found.
+            if (isDisabled(radio)) {
+                dialogCancel(dialog)?.click();
+                report(button, 'Cannot approve', 'GitHub does not let you approve this pull request.');
+                return;
+            }
+
+            radio.click();
+
+            const submit = await waitFor(() => {
+                const candidate = dialogSubmit(dialog);
+                return candidate && !isDisabled(candidate) ? candidate : null;
+            });
+
+            if (!submit) {
+                dialogCancel(dialog)?.click();
+                report(button, 'Could not approve', 'GitHub did not enable its submit button.');
+                return;
+            }
+
+            submit.click();
+
+            const closed = await waitFor(() => (dialog.isConnected ? null : true));
+            report(button, closed ? 'Approved' : 'Check the review', closed ? '' : 'The review dialog is still open.');
+        } finally {
+            busy = false;
+        }
+    }
 
     /* ------------------------------------------------------------------ *
-     * Settings, from the Tampermonkey menu
+     * The button
      * ------------------------------------------------------------------ */
 
-    async function setToken() {
-        const input = prompt(
-            'Paste a GitHub personal access token.\n\n'
-            + 'Fine-grained: "Pull requests: Read and write" on the repositories you review.\n'
-            + 'Classic: the "repo" scope.\n\n'
-            + 'Create one at https://github.com/settings/personal-access-tokens/new\n'
-            + 'The token stays in your script manager and is only sent to api.github.com.\n'
-            + 'Leave empty to remove it.',
-            '',
-        );
+    /**
+     * Dressed from the review button next to it, so it follows GitHub's styling
+     * through whatever Primer ships next. Only the prc-Button-* classes are
+     * taken; the rest of that list is layout for the review button alone.
+     */
+    function createButton(review) {
+        const button = document.createElement('button');
+        button.id = BUTTON_ID;
+        button.type = 'button';
+        button.className = [...review.classList].filter((name) => name.startsWith('prc-Button-')).join(' ');
+        button.dataset.component = 'Button';
+        button.dataset.size = review.dataset.size ?? 'small';
+        button.dataset.variant = 'default';
+        button.style.marginRight = '8px';
+        button.setAttribute('aria-live', 'polite');
+        setState(button, LABEL);
 
-        if (input === null) {
-            return;
-        }
+        // A disabled-looking button that still takes focus and shows its
+        // tooltip, so the reason it cannot be pressed stays readable.
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
 
-        const token = input.trim();
-        if (!token) {
-            GM_setValue(KEY_TOKEN, '');
-            toast('Token removed', 'success');
-            return;
-        }
+            if (button.getAttribute('aria-disabled') !== 'true') {
+                approve(button);
+            }
+        });
 
-        try {
-            const user = await api('GET', '/user', token);
-            GM_setValue(KEY_TOKEN, token);
-            toast(`Token saved for ${user.login}`, 'success');
-        } catch (error) {
-            toast(`Token not saved: ${error.message}`, 'error');
-        }
+        return button;
     }
 
-    function setShortcut() {
-        const input = prompt(
-            `Shortcut for approving, e.g. ${DEFAULT_SHORTCUT}\n\n`
-            + 'Modifiers: Ctrl, Alt, Shift, Meta (Cmd). Then one letter or digit.',
-            GM_getValue(KEY_SHORTCUT, DEFAULT_SHORTCUT),
-        );
+    function sync() {
+        const existing = document.getElementById(BUTTON_ID);
+        const review = onDiffPage() ? document.querySelector(REVIEW_BUTTON) : null;
 
-        if (input === null) {
+        // GitHub keeps the old header on screen while the next page loads, so
+        // the button is taken out by hand when the reader leaves the diff.
+        if (!review) {
+            existing?.remove();
             return;
         }
 
-        if (!parseShortcut(input)) {
-            toast('Not a valid shortcut. Use at least one modifier and one letter or digit.', 'error');
+        if (existing && existing.nextElementSibling === review) {
             return;
         }
 
-        GM_setValue(KEY_SHORTCUT, input.trim());
-        toast(`Shortcut is now ${input.trim()}`, 'success');
+        existing?.remove();
+        review.before(createButton(review));
     }
 
-    function setMessage() {
-        const input = prompt('Comment to leave with each approval. Leave empty for none.', GM_getValue(KEY_MESSAGE, ''));
+    /* ------------------------------------------------------------------ *
+     * Wiring into GitHub's client-side navigation
+     *
+     * GitHub only loads a user script when you arrive from outside the site;
+     * every step within it is a pushState away. The script is therefore
+     * matched on all of github.com and finds its own page by watching the DOM.
+     * ------------------------------------------------------------------ */
 
-        if (input === null) {
-            return;
-        }
+    let debounce = null;
 
-        GM_setValue(KEY_MESSAGE, input.trim());
-        toast('Approval message saved', 'success');
+    function schedule() {
+        clearTimeout(debounce);
+        debounce = setTimeout(sync, 100);
     }
 
-    GM_registerMenuCommand('Quick approve: set GitHub token…', setToken);
-    GM_registerMenuCommand('Quick approve: change shortcut…', setShortcut);
-    GM_registerMenuCommand('Quick approve: change approval message…', setMessage);
+    new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
+    window.addEventListener('popstate', schedule);
+    document.addEventListener('turbo:load', schedule);
+    schedule();
 })();

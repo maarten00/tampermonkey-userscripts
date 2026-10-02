@@ -7,7 +7,7 @@ Each one is a single self-contained file: no build step, no dependencies.
 |--------|--------------|
 | [GitHub: mark test files as viewed](github-mark-test-files-viewed.user.js) | Adds a button to a pull request diff that ticks every test file as *viewed*, leaving only the real code to review. |
 | [GitHub: collapse pull request labels](github-collapse-pr-labels.user.js) | Folds the labels on a pull request list into one small count, so the titles line up. Click the count to see a row's labels. |
-| [GitHub: quick approve](github-quick-approve.user.js) | Approves the pull request you are looking at with one keyboard shortcut, without opening the review dialog. |
+| [GitHub: quick approve](github-quick-approve.user.js) | Adds an **Approve** button next to the review button on a pull request's Files changed tab. One click approves. |
 
 ## Install
 
@@ -139,37 +139,22 @@ them on first paint, instead of letting them flash into view and then vanish.
 
 ## GitHub: quick approve
 
-Press **Alt+Shift+U** (**Cmd+Shift+U** on a Mac) on any page of a pull request —
-Conversation, Commits, Checks or Files changed — and it is approved. A small
-toast in the corner confirms it, or says why GitHub refused (approving your own
-pull request, a token without access, a branch that needs something else).
+On a pull request's **Files changed** tab, an **Approve** button appears next to
+GitHub's own *Submit review* button. One click opens the review dialog, picks
+*Approve* and submits it — the same three steps you would do by hand.
 
-Shortcuts are ignored while you are typing in a text field, so a comment can
-never approve anything by accident.
+The button reports back on itself: *Approving…*, then *Approved*. If GitHub does
+not let you approve — your own pull request, or a repository you cannot write
+to — it says *Cannot approve* and hovering gives the reason. Nothing is sent in
+that case; the dialog is closed the way it was found.
 
-### Setup
+There is nothing to set up. It presses GitHub's buttons, so it needs no token
+and cannot do anything you could not do yourself. Any text you have already
+typed into the review box goes along with the approval.
 
-Approving goes through GitHub's REST API, so the script needs a personal access
-token. The first press asks for one; you can also open it from the Tampermonkey
-menu (**Quick approve: set GitHub token…**).
-
-- **Fine-grained** — [create one](https://github.com/settings/personal-access-tokens/new)
-  with **Pull requests: Read and write** on the repositories you review.
-- **Classic** — the `repo` scope.
-
-The token is checked against GitHub before it is saved. It lives in the user
-script manager and is only ever sent to `api.github.com`; the request goes
-through `GM_xmlhttpRequest`, so it never touches the page.
-
-### Settings
-
-All three are in the Tampermonkey menu and apply on every repository:
-
-- **Change shortcut** — modifiers (`Ctrl`, `Alt`, `Shift`, `Meta`) plus one
-  letter or digit, such as `Ctrl+Shift+A`. At least one modifier is required.
-- **Change approval message** — a comment sent with every approval. Empty by
-  default.
-- **Set GitHub token** — empty the field to remove it.
+It only lives on the Files changed tab, because that is where GitHub puts the
+review button. Like the other scripts it dresses itself in the review button's
+own `prc-Button-*` classes, read off the page at runtime.
 
 ## Why the scripts match all of github.com
 
