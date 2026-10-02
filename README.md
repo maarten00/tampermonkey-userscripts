@@ -7,6 +7,7 @@ Each one is a single self-contained file: no build step, no dependencies.
 |--------|--------------|
 | [GitHub: mark test files as viewed](github-mark-test-files-viewed.user.js) | Adds a button to a pull request diff that ticks every test file as *viewed*, leaving only the real code to review. |
 | [GitHub: collapse pull request labels](github-collapse-pr-labels.user.js) | Folds the labels on a pull request list into one small count, so the titles line up. Click the count to see a row's labels. |
+| [GitHub: quick approve](github-quick-approve.user.js) | Approves the pull request you are looking at with one keyboard shortcut, without opening the review dialog. |
 
 ## Install
 
@@ -136,7 +137,41 @@ than by the script reaching into each row. Rows stream in a batch at a time and
 React re-renders them as it pleases; a rule that is already in the page hides
 them on first paint, instead of letting them flash into view and then vanish.
 
-## Why both scripts match all of github.com
+## GitHub: quick approve
+
+Press **Alt+Shift+U** (**Cmd+Shift+U** on a Mac) on any page of a pull request —
+Conversation, Commits, Checks or Files changed — and it is approved. A small
+toast in the corner confirms it, or says why GitHub refused (approving your own
+pull request, a token without access, a branch that needs something else).
+
+Shortcuts are ignored while you are typing in a text field, so a comment can
+never approve anything by accident.
+
+### Setup
+
+Approving goes through GitHub's REST API, so the script needs a personal access
+token. The first press asks for one; you can also open it from the Tampermonkey
+menu (**Quick approve: set GitHub token…**).
+
+- **Fine-grained** — [create one](https://github.com/settings/personal-access-tokens/new)
+  with **Pull requests: Read and write** on the repositories you review.
+- **Classic** — the `repo` scope.
+
+The token is checked against GitHub before it is saved. It lives in the user
+script manager and is only ever sent to `api.github.com`; the request goes
+through `GM_xmlhttpRequest`, so it never touches the page.
+
+### Settings
+
+All three are in the Tampermonkey menu and apply on every repository:
+
+- **Change shortcut** — modifiers (`Ctrl`, `Alt`, `Shift`, `Meta`) plus one
+  letter or digit, such as `Ctrl+Shift+A`. At least one modifier is required.
+- **Change approval message** — a comment sent with every approval. Empty by
+  default.
+- **Set GitHub token** — empty the field to remove it.
+
+## Why the scripts match all of github.com
 
 A user script is injected when a document loads, and GitHub only loads one when
 you arrive from outside the site. Every step within it — a repository's Pull
@@ -145,7 +180,7 @@ requests tab, a pull request, its Files tab, a filter, the next page — is a
 therefore never runs for anyone who clicked their way there, which is how anyone
 normally gets there.
 
-So both scripts match `https://github.com/*`, are running long before the page
+So these scripts match `https://github.com/*`, are running long before the page
 they care about appears, and decide for themselves whether they are on it —
 tidying up after themselves when a click takes the reader somewhere else.
 
