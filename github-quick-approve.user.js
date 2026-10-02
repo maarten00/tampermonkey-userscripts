@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: quick approve
 // @namespace    https://github.com/maarten00
-// @version      2.0.0
+// @version      2.1.0
 // @description  Adds an Approve button to every tab of a pull request. One click approves it, without opening the review dialog yourself.
 // @author       maarten00
 // @license      MIT
@@ -33,6 +33,11 @@
     // The title row's actions (View status, Code), present on every tab.
     const HEADER_ACTIONS = '[class*="PageHeader-Actions"]';
     const TAB_NAV = 'nav[aria-label="Pull request navigation"]';
+    // The Conversation tab's sidebar: one row per reviewer, an approving
+    // review marked with a check. A dismissed approval loses it.
+    const REVIEWERS = 'form.js-issue-sidebar-form[aria-label="Select reviewers"]';
+    const REVIEWER_ROW = '.flex-items-center';
+    const APPROVED_ICON = 'svg.octicon-check';
 
     const BUTTON_ID = 'tm-quick-approve';
     const LABEL = 'Approve';
@@ -42,6 +47,7 @@
     const WAIT_MS = 4000;
 
     const onPullPage = () => /^\/[^/]+\/[^/]+\/pull\/\d+(\/|$)/.test(location.pathname);
+    const pullKey = () => location.pathname.match(/^\/([^/]+\/[^/]+\/pull\/\d+)(?:\/|$)/)?.[1] ?? null;
     const onDiffPage = () => /^\/[^/]+\/[^/]+\/pull\/\d+\/(files|changes)\b/.test(location.pathname);
 
     /* ------------------------------------------------------------------ *
@@ -90,9 +96,13 @@
             return;
         }
 
-        button.textContent = state.label;
-        button.title = state.title;
-        button.setAttribute('aria-disabled', String(state.disabled));
+        // Only while idle: progress and failures are news, and an approval you
+        // just made should read "Approved" once the message has run its course.
+        const done = state.label === LABEL && hasApproved();
+
+        button.textContent = done ? 'Approved' : state.label;
+        button.title = done ? 'You have already approved this pull request.' : state.title;
+        button.setAttribute('aria-disabled', String(state.disabled || done));
     }
 
     function setState(label, { disabled = false, title = '' } = {}) {
@@ -108,6 +118,68 @@
     function report(label, title) {
         setState(label, { title });
         resetTimer = setTimeout(() => setState(LABEL), 3000);
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Whether you have approved already
+     *
+     * Only the Conversation tab lists reviewers, so the page is fetched from
+     * wherever you are — with your own session, no token — and its sidebar
+     * read. That sidebar shows each reviewer's standing review, so an approval
+     * that was dismissed no longer counts, and neither does one you replaced
+     * with a request for changes.
+     *
+     * Unknown is not the same as not approved: if the sidebar cannot be read,
+     * the button is left alone.
+     * ------------------------------------------------------------------ */
+
+    let approval = { key: null, approved: false };
+    let lookup = Promise.resolve();
+
+    const hasApproved = () => approval.key !== null && approval.key === pullKey() && approval.approved;
+
+    async function loadApproval(key) {
+        const login = document.querySelector('meta[name="user-login"]')?.content?.toLowerCase();
+        if (!login) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/${key}`, { credentials: 'same-origin', headers: { Accept: 'text/html' } });
+            if (!response.ok) {
+                return;
+            }
+
+            const form = new DOMParser().parseFromString(await response.text(), 'text/html').querySelector(REVIEWERS);
+            if (!form || key !== pullKey()) {
+                return;
+            }
+
+            approval = {
+                key,
+                approved: [...form.querySelectorAll('a[href]')]
+                    .filter((link) => link.getAttribute('href').toLowerCase() === `/${login}`)
+                    .some((link) => link.closest(REVIEWER_ROW)?.querySelector(APPROVED_ICON) !== null),
+            };
+            render();
+        } catch (error) {
+            // Offline, or GitHub is having a moment: leave the button as it is.
+        }
+    }
+
+    function refreshApproval() {
+        const key = pullKey();
+
+        if (key === null) {
+            approval = { key: null, approved: false };
+            return;
+        }
+
+        if (approval.key !== key) {
+            approval = { key, approved: false };
+        }
+
+        lookup = loadApproval(key);
     }
 
     /* ------------------------------------------------------------------ *
@@ -146,6 +218,15 @@
         let moved = false;
 
         try {
+            // A click that lands before the sidebar has been read would
+            // approve twice, so it waits for the answer.
+            await lookup;
+
+            if (hasApproved()) {
+                setState(LABEL);
+                return;
+            }
+
             moved = await reachDiff();
 
             if (moved === null) {
@@ -203,6 +284,7 @@
                 return;
             }
 
+            approval = { key: pullKey(), approved: true };
             report('Approved');
 
             // Back to the tab it was started from. Only on success: after a
@@ -272,6 +354,11 @@
     }
 
     function sync() {
+        // Once per pull request; the focus listener below keeps it fresh.
+        if (pullKey() !== approval.key) {
+            refreshApproval();
+        }
+
         const existing = document.getElementById(BUTTON_ID);
         const anchor = findAnchor();
 
@@ -311,6 +398,13 @@
 
     new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
     window.addEventListener('popstate', schedule);
+    // Approvals get dismissed, and a new push can dismiss them, while the tab
+    // sits in the background.
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && pullKey() !== null) {
+            refreshApproval();
+        }
+    });
     document.addEventListener('turbo:load', schedule);
     schedule();
 })();

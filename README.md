@@ -155,6 +155,12 @@ to — it says *Cannot approve*, hovering gives the reason, and you stay on File
 changed so you can see it. Nothing is sent in that case; the dialog is closed the
 way it was found.
 
+Once you have approved, the button greys out and reads *Approved*. It goes by
+the reviewers list on the Conversation tab, so an approval that was dismissed —
+or that you replaced with a request for changes — does not count and the button
+comes back. That list is fetched in the background from whichever tab you are
+on, with your own session, and checked again whenever you return to the tab.
+
 There is nothing to set up: no token, no settings, and it cannot do anything you
 could not do yourself. Text already typed into the review box goes along with
 the approval.
