@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: mark test files as viewed
 // @namespace    https://github.com/maarten00
-// @version      3.7.0
+// @version      3.7.1
 // @description  Cuts a GitHub pull request diff down to what you actually need to read: marks test files as viewed and folds away finished folders.
 // @author       maarten00
 // @license      MIT
@@ -102,13 +102,16 @@
         refreshCount();
     }
 
-    // A path is a test when it matches any of these.
+    // A path is a test when it matches any of these. A bare spec/ folder is not
+    // on the list: the word names too many things that are not tests, such as
+    // a plugin that writes specifications.
     const TEST_PATTERNS = [
-        /(^|\/)(tests?|integrationtests|unittests|featuretests|functionaltests|acceptancetests|browsertests|e2e|spec)\//i,
+        /(^|\/)(tests?|integrationtests|unittests|featuretests|functionaltests|acceptancetests|browsertests|e2e)\//i,
         /(^|\/)__tests__\//,
         /Test\.php$/,
         /Cest\.php$/,
         /\.(test|spec)\.[jt]sx?$/,
+        /_spec\.rb$/,
         /\.suite\.ya?ml$/,
         /(^|\/)(phpunit|codeception)[\w.]*\.(xml|ya?ml)(\.dist)?$/i,
         /(^|\/)cypress\//i,
@@ -163,19 +166,26 @@
             .some((text) => text && text.trim().length < 60 && VIEWED.test(text));
     }
 
+    /**
+     * The extension is what tells a path from any other text with a slash in
+     * it. Files without one, such as LICENSE or a Makefile, only count when the
+     * embedded file list names them.
+     */
     function pathFromText(text) {
         const trimmed = clean(text);
         if (!trimmed || trimmed.length > 200) {
             return null;
         }
-        if (PATH_LIKE.test(trimmed)) {
+
+        const isPath = (candidate) => PATH_LIKE.test(candidate) || Boolean(payloadPaths()?.has(candidate));
+        if (isPath(trimmed)) {
             return trimmed;
         }
 
         // Accessible names such as "Mark tests/FooTest.php as viewed".
         const embedded = trimmed.match(/[\w.@~+-]+(?:\/[\w.@~+-]+)+/);
 
-        return embedded && PATH_LIKE.test(embedded[0]) ? embedded[0] : null;
+        return embedded && isPath(embedded[0]) ? embedded[0] : null;
     }
 
     function countControls(node) {
@@ -266,7 +276,7 @@
      * The embedded file list
      * ------------------------------------------------------------------ */
 
-    let payloadCache = { pr: null, files: null };
+    let payloadCache = { pr: null, files: null, paths: null };
 
     /**
      * GitHub ships the complete file list in the page as JSON, and it is there
@@ -283,7 +293,7 @@
             return payloadCache.files;
         }
 
-        payloadCache = { pr: current, files: null };
+        payloadCache = { pr: current, files: null, paths: null };
 
         for (const script of document.querySelectorAll('script[type="application/json"]')) {
             let route;
@@ -298,11 +308,18 @@
                     path: summary.path,
                     viewed: Boolean(summary.markedAsViewed),
                 }));
+                payloadCache.paths = new Set(payloadCache.files.map((file) => file.path));
                 break;
             }
         }
 
         return payloadCache.files;
+    }
+
+    function payloadPaths() {
+        payloadFiles();
+
+        return payloadCache.paths;
     }
 
     /**
@@ -1296,7 +1313,7 @@
         }
 
         if (payloadCache.pr && !location.pathname.includes(`/pull/${payloadCache.pr}/`)) {
-            payloadCache = { pr: null, files: null };
+            payloadCache = { pr: null, files: null, paths: null };
         }
 
         if (!onDiffPage()) {

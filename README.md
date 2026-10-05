@@ -100,8 +100,8 @@ everything is viewed, and changing what counts as a test has to stay reachable.
 The `TEST_PATTERNS` list at the top of the script decides. It ships with the
 common PHP and JavaScript conventions:
 
-- `tests/`, `spec/`, `e2e/`, `__tests__/` and similar directories
-- `*Test.php`, `*Cest.php`, `*.test.js`, `*.spec.ts`
+- `tests/`, `e2e/`, `__tests__/` and similar directories
+- `*Test.php`, `*Cest.php`, `*.test.js`, `*.spec.ts`, `*_spec.rb`
 - `phpunit.xml`, `codeception.yml`, `*.suite.yml`
 - `cypress/`
 
