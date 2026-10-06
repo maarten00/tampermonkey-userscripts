@@ -52,7 +52,7 @@ The panel reflects what it can do:
 |---|---|
 | **19** Mark tests viewed | there is work to do |
 | **19** All tests viewed *(greyed out)* | everything already viewed |
-| `loading… 8/48` | GitHub is still streaming the diff in |
+| `loading… 8/48` | the file list is not in yet, so the diff is counted as it streams in |
 | No test files *(greyed out)* | nothing in this pull request matches |
 
 The count sits in a badge on the button, and the button greys out when there is
@@ -61,10 +61,25 @@ attribute: both look the same in GitHub's styling, but a truly disabled button
 leaves the tab order and swallows the hover that shows its tooltip — losing the
 explanation of why it cannot be pressed, exactly when it is wanted.
 
-You can press the button while the diff is still loading. GitHub renders large
-diffs in batches over several seconds, so the script waits for files that have
-not appeared yet instead of stopping at whatever is on screen. **Undo** reverses
-the files that run touched, and nothing else.
+On the current diff view the button does not click anything: it sends the same
+request the toggle sends, a few files at a time, then reloads the page so the
+diff shows them folded. That takes seconds even on a pull request of hundreds
+of files, where GitHub only renders the few diffs in view and clicking would
+mean bringing each one on screen first. The reload reopens at the file you were
+looking at, and **Undo** survives it.
+
+The clicking is still there as a fallback, should GitHub ever change that
+request: the script then jumps from one test file to the next and ticks each
+toggle itself. It replaces the URL rather than navigating, so the jumps stay out
+of your history, and afterwards it checks with GitHub that the changes stuck.
+The classic diff view always works this way, rendering more as it scrolls.
+
+GitHub limits how many files can be marked in a short while — mark and unmark a
+few hundred files several times over and it starts refusing, your own clicks
+included, for a while. The panel then says it was throttled and how many files
+are left, and pressing the button again later picks up the rest.
+
+**Undo** reverses the files that run touched, and nothing else.
 
 ### Appearance
 

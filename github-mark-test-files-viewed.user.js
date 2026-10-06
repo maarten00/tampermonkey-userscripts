@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: mark test files as viewed
 // @namespace    https://github.com/maarten00
-// @version      3.7.1
+// @version      3.8.0
 // @description  Cuts a GitHub pull request diff down to what you actually need to read: marks test files as viewed and folds away finished folders.
 // @author       maarten00
 // @license      MIT
@@ -35,6 +35,11 @@
         settleWindowMs: 1500,   // Fallback only: how long the count must hold steady when no total is known.
         stallTimeoutMs: 15000,  // Give up waiting for stragglers; rendering can pause for seconds.
         anchorGraceMs: 8000,    // How long to wait for the toolbar before floating the panel instead.
+        jumpWaitMs: 4000,       // How long a file jumped to may take to render its toggle.
+        jumpPollMs: 50,         // How often to look for it meanwhile.
+        requestConcurrency: 6,  // Viewed-state requests in flight at once.
+        requestAttempts: 3,     // Tries per file before it counts as failed.
+        retryDelayMs: 1000,     // Wait before retrying a throttled request, doubled each time.
     };
 
     /* ------------------------------------------------------------------ *
@@ -276,75 +281,141 @@
      * The embedded file list
      * ------------------------------------------------------------------ */
 
-    let payloadCache = { pr: null, files: null, paths: null };
+    const currentPr = () => location.pathname.match(/\/pull\/(\d+)/)?.[1] ?? null;
+
+    const emptyCache = (pr) => ({
+        pr, files: null, paths: null, digests: null, live: new Map(), scanned: false, requested: false,
+    });
+
+    let payloadCache = emptyCache(null);
+
+    /** Everything known about the pull request in the URL, started afresh on moving to another. */
+    function prCache() {
+        const current = currentPr();
+        if (payloadCache.pr !== current) {
+            payloadCache = emptyCache(current);
+        }
+
+        return payloadCache;
+    }
+
+    function adoptRoute(cache, route) {
+        if (!Array.isArray(route?.diffSummaries) || String(route.pullRequest?.number) !== cache.pr) {
+            return false;
+        }
+
+        cache.files = route.diffSummaries.map((summary) => ({
+            path: summary.path,
+            viewed: Boolean(summary.markedAsViewed),
+        }));
+        cache.paths = new Set(cache.files.map((file) => file.path));
+        cache.digests = new Map(route.diffSummaries
+            .filter((summary) => summary.pathDigest)
+            .map((summary) => [summary.path, summary.pathDigest]));
+
+        return true;
+    }
 
     /**
      * GitHub ships the complete file list in the page as JSON, and it is there
      * long before the diffs themselves render. The script node survives
      * client-side navigation untouched, so it goes stale as soon as you move to
      * another pull request; it is only trusted when its number matches the URL.
+     * Arriving by client-side navigation leaves no list for this pull request in
+     * the page at all, so then it is asked for instead.
      */
     function payloadFiles() {
-        const current = location.pathname.match(/\/pull\/(\d+)/)?.[1];
-        if (!current) {
-            return null;
-        }
-        if (payloadCache.pr === current) {
-            return payloadCache.files;
+        const cache = prCache();
+        if (!cache.pr || cache.files) {
+            return cache.files;
         }
 
-        payloadCache = { pr: current, files: null, paths: null };
+        if (!cache.scanned) {
+            cache.scanned = true;
 
-        for (const script of document.querySelectorAll('script[type="application/json"]')) {
-            let route;
-            try {
-                route = JSON.parse(script.textContent)?.payload?.pullRequestsChangesRoute;
-            } catch {
-                continue;
-            }
+            for (const script of document.querySelectorAll('script[type="application/json"]')) {
+                let route;
+                try {
+                    route = JSON.parse(script.textContent)?.payload?.pullRequestsChangesRoute;
+                } catch {
+                    continue;
+                }
 
-            if (Array.isArray(route?.diffSummaries) && String(route.pullRequest?.number) === current) {
-                payloadCache.files = route.diffSummaries.map((summary) => ({
-                    path: summary.path,
-                    viewed: Boolean(summary.markedAsViewed),
-                }));
-                payloadCache.paths = new Set(payloadCache.files.map((file) => file.path));
-                break;
+                if (adoptRoute(cache, route)) {
+                    break;
+                }
             }
         }
 
-        return payloadCache.files;
+        if (!cache.files && !cache.requested && /\/pull\/\d+\/changes\b/.test(location.pathname)) {
+            cache.requested = true;
+            requestRoute(cache);
+        }
+
+        return cache.files;
+    }
+
+    /** The changes page hands over the same JSON when asked for it. */
+    async function fetchRoute() {
+        const response = await fetch(location.pathname, {
+            headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            cache: 'no-store',
+        });
+
+        return (await response.json())?.payload?.pullRequestsChangesRoute ?? null;
+    }
+
+    async function requestRoute(cache) {
+        try {
+            if (adoptRoute(cache, await fetchRoute()) && cache === payloadCache) {
+                refreshCount();
+            }
+        } catch {
+            // Then the tally makes do with what has rendered.
+        }
     }
 
     function payloadPaths() {
         payloadFiles();
 
-        return payloadCache.paths;
+        return prCache().paths;
     }
 
     /**
-     * What the diff contains versus what is on screen right now. Paths come from
-     * the payload when it is usable, so the tally is right before rendering
-     * finishes; viewed state prefers the DOM, which is live.
+     * Viewed state as last seen on the page. A large diff is virtualized and
+     * unmounts files scrolled out of view, while the payload only knows how
+     * things stood at load, so whatever was seen is remembered instead.
+     */
+    function remember(files) {
+        const { live } = prCache();
+        for (const file of files) {
+            live.set(file.path, isViewed(file.control));
+        }
+
+        return live;
+    }
+
+    /**
+     * What the diff contains and how much of it is done. Paths come from the
+     * payload when it is usable, so the tally is right before rendering
+     * finishes; viewed state prefers what the page has shown, which is live.
      */
     function tally() {
-        const rendered = new Map(scanFiles().map((file) => [file.path, isViewed(file.control)]));
+        const live = remember(scanFiles());
         const payload = payloadFiles();
-        const known = payload ?? [...rendered].map(([path, viewed]) => ({ path, viewed }));
+        const known = payload ?? [...live].map(([path, viewed]) => ({ path, viewed }));
 
         // How many files the diff really holds: the payload knows, and failing
         // that GitHub's own counter carries the total from the first paint.
-        const total = payload ? payload.length : (totalFileCount() ?? rendered.size);
+        const total = payload ? payload.length : (totalFileCount() ?? live.size);
 
         const tests = known.filter((file) => isTestPath(file.path));
-        const pending = tests.filter(
-            (file) => (rendered.has(file.path) ? !rendered.get(file.path) : !file.viewed),
-        );
+        const pending = tests.filter((file) => !(live.get(file.path) ?? file.viewed));
 
         return {
             hasPayload: Boolean(payload),
             total,
-            rendered: rendered.size,
+            seen: live.size,
             tests: tests.length,
             pending: pending.length,
             pendingPaths: new Set(pending.map((file) => file.path)),
@@ -369,15 +440,15 @@
     const keptExpanded = new Set();
     let clickingTree = false;
 
-    /** Every file in the diff mapped to whether it is viewed; the DOM wins. */
+    /** Every file in the diff mapped to whether it is viewed; what the page has shown wins. */
     function fileViewState() {
         const viewed = new Map();
 
         for (const file of payloadFiles() ?? []) {
             viewed.set(file.path, file.viewed);
         }
-        for (const file of scanFiles()) {
-            viewed.set(file.path, isViewed(file.control));
+        for (const [path, isSeen] of remember(scanFiles())) {
+            viewed.set(path, isSeen);
         }
 
         return viewed;
@@ -504,6 +575,34 @@
     const atBottom = (scroller) => scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4;
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+    const frameTopOf = (scroller) => (scroller === document.scrollingElement || scroller === document.documentElement
+        ? 0
+        : scroller.getBoundingClientRect().top);
+
+    // A row of the virtualized diff list a large pull request gets: only the
+    // rows around the viewport exist, and each loads its diff after it mounts.
+    const VIRTUAL_ROW = '[data-path-digest][data-index]';
+
+    /**
+     * Brings one file into view through its #diff- anchor, as a link from the
+     * file tree does, and waits for its toggle. GitHub follows the URL even
+     * when it is replaced rather than navigated, and replacing keeps the jumps
+     * out of the history: a few hundred pushed entries would leave nothing else
+     * on the back button.
+     */
+    async function jumpTo(digest) {
+        const hash = `#diff-${digest}`;
+        if (location.hash === hash) {
+            location.replace('#');      // The same hash again is no change, and so no jump.
+        }
+        location.replace(hash);
+
+        const deadline = Date.now() + CONFIG.jumpWaitMs;
+        while (Date.now() < deadline && !document.getElementById(`diff-${digest}`)?.querySelector(VIEWED_BUTTON)) {
+            await sleep(CONFIG.jumpPollMs);
+        }
+    }
+
     /**
      * Pins the reader's view in place for the length of a sweep.
      *
@@ -520,9 +619,7 @@
      * has to wait for a reflow that has not landed yet.
      */
     function pinView(scroller) {
-        const frameTop = scroller === document.scrollingElement || scroller === document.documentElement
-            ? 0
-            : scroller.getBoundingClientRect().top;
+        const frameTop = frameTopOf(scroller);
         const scrollTop = scroller.scrollTop;
 
         // The first header still on screen, or failing that the next one down;
@@ -584,8 +681,11 @@
 
         schedule();
 
+        // A jump swaps out every header a virtualized list had rendered, and a
+        // lost anchor means snapping back to the start, so jumping lets go.
         return {
             reset: () => { anchor = find(); },      // After a deliberate scroll, the new position is the one to hold.
+            release: () => { anchor = null; },
             stop: () => { live = false; },
             restore: () => correctTo(home),
         };
@@ -595,7 +695,7 @@
      * Sweeping the diff
      * ------------------------------------------------------------------ */
 
-    const state = { running: false, cancelled: false, marked: [], resultText: '', resultPending: 0 };
+    const state = { pr: null, running: false, cancelled: false, marked: [], resultText: '', resultPending: 0 };
 
     /**
      * Scans and toggles until every target has been dealt with.
@@ -609,8 +709,11 @@
      * puts every file in the page up front and hydrates the toggles by itself,
      * so scrolling past them buys nothing and only throws the reader around.
      * The classic view does render on scroll, so a round that turns up nothing
-     * new advances a step to shake the next batch loose. Whatever the sweep
-     * does move, it moves back when it is done.
+     * new advances a step to shake the next batch loose. A large pull request
+     * gets a virtualized list that only ever holds the files in view, and there
+     * the sweep jumps from one target to the next by its #diff- anchor, so no
+     * time goes on rendering the files in between. Whatever the sweep does
+     * move, it moves back when it is done.
      */
     async function sweep(desired, matches, onProgress, expected, minSeen) {
         const touched = new Set();
@@ -618,8 +721,16 @@
         const deadline = Date.now() + CONFIG.maxRuntimeMs;
         const scroller = getScroller();
         const pin = pinView(scroller);
+        const origin = { url: location.href, state: history.state, scrollTop: scroller.scrollTop, inView: fileInView(scroller) };
 
         const outstanding = () => (expected ? [...expected].filter((path) => !handled.has(path)).length : null);
+
+        // Jumping needs the anchor of each file, which only the payload knows.
+        const jumped = new Set();
+        const digests = expected ? prCache().digests : null;
+        const nextJump = () => (digests
+            ? [...expected].find((path) => !handled.has(path) && !jumped.has(path) && digests.has(path))
+            : undefined);
 
         let lastProgressAt = Date.now();
         let idleStreak = 0;
@@ -628,8 +739,10 @@
         try {
             while (Date.now() < deadline && !state.cancelled) {
                 let progressed = false;
+                const files = scanFiles();
+                remember(files);
 
-                for (const file of scanFiles()) {
+                for (const file of files) {
                     if (handled.has(file.path)) {
                         continue;
                     }
@@ -642,6 +755,7 @@
                     }
 
                     file.control.click();
+                    prCache().live.set(file.path, desired);
                     touched.add(file.path);
                     onProgress(touched.size, outstanding());
                     await sleep(CONFIG.clickDelayMs);
@@ -666,7 +780,21 @@
                     if (Date.now() - lastProgressAt >= CONFIG.stallTimeoutMs) {
                         break;
                     }
+                }
 
+                // A virtualized list never renders a file until it is in view, so
+                // there the next target is fetched as soon as the ones on screen
+                // are done. Elsewhere files turn up on their own, and a jump only
+                // goes after one that a whole round has not produced.
+                const jump = !progressed || document.querySelector(VIRTUAL_ROW) ? nextJump() : undefined;
+                if (jump) {
+                    jumped.add(jump);
+                    pin.release();
+                    await jumpTo(digests.get(jump));
+                    continue;
+                }
+
+                if (!progressed) {
                     if (!atBottom(scroller)) {
                         // Nothing arrived on its own, so this is the classic view:
                         // it renders what has been scrolled past and nothing more.
@@ -690,11 +818,269 @@
             pin.stop();
         }
 
-        if (scrolled) {
+        if (jumped.size) {
+            await returnTo(origin, scroller);
+        } else if (scrolled) {
             pin.restore();
         }
 
         return { touched: [...touched], missed: outstanding() ?? 0 };
+    }
+
+    /** Puts the reader back after a run of jumps, on the file and the URL they had. */
+    async function returnTo(origin, scroller) {
+        const digest = origin.inView?.slice('diff-'.length);
+        if (digest) {
+            await jumpTo(digest);
+        } else {
+            scroller.scrollTop = origin.scrollTop;
+        }
+
+        history.replaceState(origin.state, '', origin.url);
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Marking without the diff
+     *
+     * The toggle in the current diff view is one request to the pull
+     * request's file_review endpoint, so files can be marked without being
+     * rendered. The page never hears of requests it did not send itself, so it
+     * is reloaded afterwards, and the run's result and undo list ride along in
+     * sessionStorage.
+     * ------------------------------------------------------------------ */
+
+    const RUN_KEY = `${STORAGE_PREFIX}last-run`;
+
+    /** Only the current view has the endpoint. The classic one posts a form. */
+    function reviewEndpoint() {
+        const base = location.pathname.match(/^\/[^/]+\/[^/]+\/pull\/\d+(?=\/changes\b)/)?.[0];
+        const nonce = document.querySelector('meta[name="fetch-nonce"]')?.content;
+
+        return base && nonce ? { url: `${base}/file_review`, nonce } : null;
+    }
+
+    /**
+     * 'ok' once GitHub has taken the change, 'throttled' when it keeps
+     * answering 429, and 'refused' for anything else. Unmarking has to be a
+     * real DELETE: a POST carrying _method is answered with a 200 and changes
+     * nothing.
+     */
+    async function sendReview(endpoint, path, viewed) {
+        const body = viewed ? { path, viewed: 'viewed' } : { path, _method: 'delete' };
+
+        for (let attempt = 0; attempt < CONFIG.requestAttempts; attempt++) {
+            let response = null;
+            try {
+                response = await fetch(endpoint.url, {
+                    method: viewed ? 'POST' : 'DELETE',
+                    headers: {
+                        Accept: 'application/json',
+                        'Content-Type': 'application/json',
+                        'GitHub-Verified-Fetch': 'true',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'X-Fetch-Nonce': endpoint.nonce,
+                    },
+                    body: JSON.stringify(body),
+                });
+            } catch {
+                // The network dropped it. That is worth another try.
+            }
+
+            if (response?.ok) {
+                return 'ok';
+            }
+            if (response && response.status !== 429 && response.status < 500) {
+                return 'refused';   // Asking again will not change it.
+            }
+            if (attempt === CONFIG.requestAttempts - 1) {
+                return response?.status === 429 ? 'throttled' : 'refused';
+            }
+
+            await sleep(CONFIG.retryDelayMs * 2 ** attempt);
+        }
+
+        return 'refused';
+    }
+
+    /** Reads one file's state back from GitHub. */
+    async function confirmReview(path, viewed) {
+        try {
+            const summary = (await fetchRoute())?.diffSummaries?.find((candidate) => candidate.path === path);
+
+            return Boolean(summary?.markedAsViewed) === viewed;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Sets every path to the desired state, a few requests at a time. Returns
+     * null when this is not possible at all, so the caller can click instead.
+     *
+     * Throttling is the exception. GitHub limits how many files can be marked
+     * in a while, its own toggle included, so clicking would fail silently.
+     * The run stops and says so instead.
+     */
+    async function setViewedRemotely(paths, viewed, onProgress) {
+        const endpoint = reviewEndpoint();
+        const queue = [...paths];
+        if (!endpoint || queue.length === 0) {
+            return null;
+        }
+
+        const total = queue.length;
+        const touched = [];
+        let failed = 0;
+
+        // The first one goes alone and is read back: should the endpoint have
+        // moved, or answer 200 without doing anything, that costs one request
+        // rather than a burst of them, and clicking takes over.
+        const first = queue.shift();
+        const outcome = await sendReview(endpoint, first, viewed);
+        if (outcome === 'throttled') {
+            return { touched, failed, throttled: true, left: total };
+        }
+        if (outcome === 'refused' || !(await confirmReview(first, viewed))) {
+            return null;
+        }
+        touched.push(first);
+        onProgress(touched.length, queue.length);
+
+        let throttled = false;
+
+        async function worker() {
+            while (queue.length > 0 && !state.cancelled && !throttled) {
+                const path = queue.shift();
+                const result = await sendReview(endpoint, path, viewed);
+                if (result === 'ok') {
+                    touched.push(path);
+                } else if (result === 'throttled') {
+                    throttled = true;
+                    queue.push(path);
+                } else {
+                    failed++;
+                }
+                onProgress(touched.length, total - touched.length - failed);
+            }
+        }
+
+        await Promise.all(Array.from({ length: CONFIG.requestConcurrency }, worker));
+
+        return { touched, failed, throttled, left: queue.length };
+    }
+
+    /** The diff currently at the top of the view, unless that is the top of the page. */
+    function fileInView(scroller) {
+        if (scroller.scrollTop < scroller.clientHeight) {
+            return null;
+        }
+
+        const frameTop = frameTopOf(scroller);
+        for (const node of document.querySelectorAll('[id^="diff-"]')) {
+            if (/^diff-[0-9a-f]{64}$/.test(node.id) && node.getBoundingClientRect().bottom > frameTop) {
+                return node.id;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Reloads so the diff shows what the endpoint changed. GitHub opens a
+     * #diff- link at that file, which puts the reader back where they were.
+     */
+    function reloadWith(result) {
+        try {
+            sessionStorage.setItem(RUN_KEY, JSON.stringify({ pr: currentPr(), ...result }));
+        } catch {
+            // The reload still shows the new state; only the summary and Undo are lost.
+        }
+
+        const inView = fileInView(getScroller());
+        history.replaceState(history.state, '', location.pathname + location.search + (inView ? `#${inView}` : ''));
+        location.reload();
+    }
+
+    /** Ends an endpoint run, reloading to show it when anything changed. */
+    function finishRemotely(remote, verb, stillMarked) {
+        const notes = [`${remote.touched.length} ${verb}`];
+        if (state.cancelled) {
+            notes.push('stopped');
+        }
+        if (remote.failed) {
+            notes.push(`${remote.failed} failed`);
+        }
+        if (remote.throttled) {
+            notes.push(`throttled by GitHub, ${remote.left} left for later`);
+        }
+
+        const resultText = notes.join(' · ');
+        console.log(`[mark-tests-viewed] ${verb}:`, remote.touched);
+
+        if (remote.touched.length === 0) {
+            state.marked = stillMarked;
+            setBusy(false);
+            state.resultPending = tally().pending;
+            state.resultText = resultText;
+            elements.status.textContent = resultText;
+            return;
+        }
+
+        elements.status.textContent = `${resultText} · reloading…`;
+        reloadWith({ marked: stillMarked, resultText });
+    }
+
+    /**
+     * Clicking cannot tell whether GitHub kept a change: the toggle flips at
+     * once and stays flipped when the request is turned away. So the page is
+     * asked afterwards, and its answer replaces what the tally believed.
+     * Returns the paths that did not stick.
+     */
+    async function unsaved(paths, viewed) {
+        const cache = prCache();
+        try {
+            if (!adoptRoute(cache, await fetchRoute())) {
+                return [];
+            }
+        } catch {
+            return [];
+        }
+
+        const saved = new Map(cache.files.map((file) => [file.path, file.viewed]));
+        const lost = paths.filter((path) => saved.get(path) !== viewed);
+        for (const path of lost) {
+            cache.live.set(path, !viewed);
+        }
+
+        return lost;
+    }
+
+    /**
+     * Brings a new panel up to date. Run state belongs to one pull request, so
+     * whatever another one left is dropped, and a run that reloaded the page
+     * hands over its summary and undo list.
+     */
+    function restoreRun() {
+        if (state.pr !== currentPr()) {
+            Object.assign(state, { pr: currentPr(), marked: [], resultText: '', resultPending: 0 });
+        }
+
+        let saved = null;
+        try {
+            saved = JSON.parse(sessionStorage.getItem(RUN_KEY));
+            sessionStorage.removeItem(RUN_KEY);
+        } catch {
+            // Storage is off limits, so there is nothing to pick up.
+        }
+
+        if (saved?.pr === state.pr) {
+            state.marked = Array.isArray(saved.marked) ? saved.marked : [];
+            state.resultText = String(saved.resultText || '');
+            state.resultPending = tally().pending;
+        }
+
+        elements.status.textContent = state.resultText;
+        elements.undo.hidden = state.marked.length === 0;
     }
 
     /* ------------------------------------------------------------------ *
@@ -1148,17 +1534,18 @@
         const counts = tally();
         const now = Date.now();
 
-        if (counts.rendered !== scanState.lastCount) {
-            scanState.lastCount = counts.rendered;
+        if (counts.seen !== scanState.lastCount) {
+            scanState.lastCount = counts.seen;
             scanState.stableSince = now;
         }
 
-        // The tally is final as soon as the payload is readable; only clicking
-        // has to wait, because clicking needs files that have actually rendered.
+        // The tally is final as soon as the payload is readable, and marking
+        // goes through the endpoint without waiting for anything to render.
+        // Only without the payload does the count have to wait for the diff.
         const stalled = now - scanState.stableSince >= CONFIG.stallTimeoutMs;
-        const loading = counts.total === 0
+        const loading = !counts.hasPayload && (counts.total === 0
             ? now - scanState.stableSince < CONFIG.settleWindowMs
-            : counts.rendered < counts.total && !stalled;
+            : counts.seen < counts.total && !stalled);
 
         elements.spinner.hidden = !loading;
         elements.container.setAttribute('aria-busy', String(loading));
@@ -1171,8 +1558,9 @@
             setButtonLabel(elements.button, 'Mark tests viewed');
             elements.button.title = `${counts.tests} of ${counts.total} changed files match the test patterns.`
                 + (counts.pending < counts.tests ? `\n${counts.tests - counts.pending} already viewed.` : '')
-                + (loading ? `\n${counts.rendered} loaded so far; the rest are waited for.` : '')
-                + '\nMarks each one with GitHub\'s own "Viewed" toggle.';
+                + (loading ? `\n${counts.seen} loaded so far; the rest are waited for.` : '')
+                + '\nMarks each one with GitHub\'s own "Viewed" toggle'
+                + (counts.hasPayload && reviewEndpoint() ? ', then reloads to show them folded.' : '.');
         } else if (counts.tests > 0) {
             setButtonCount(elements.button, counts.tests);
             setButtonLabel(elements.button, 'All tests viewed');
@@ -1194,7 +1582,7 @@
 
         if (!state.resultText) {
             if (loading) {
-                elements.status.textContent = `loading… ${counts.rendered}/${counts.total}`;
+                elements.status.textContent = `loading… ${counts.seen}/${counts.total}`;
             } else if (actionable && counts.pending < counts.tests) {
                 elements.status.textContent = `${counts.tests - counts.pending} of ${counts.tests} done`;
             } else {
@@ -1235,34 +1623,39 @@
         // Without the payload the pending list only covers rendered files, so it
         // would be a false finish line; fall back to counting files seen.
         const expected = counts.hasPayload ? counts.pendingPaths : null;
+        const progress = (count, outstanding) => {
+            elements.status.textContent = outstanding === null
+                ? `marked ${count}…`
+                : `marked ${count}, ${outstanding} to go…`;
+        };
 
         state.cancelled = false;
         state.marked = [];
         state.resultText = '';
         setBusy(true);
 
-        const { touched, missed } = await sweep(
-            true,
-            isTestPath,
-            (count, outstanding) => {
-                elements.status.textContent = outstanding === null
-                    ? `marked ${count}…`
-                    : `marked ${count}, ${outstanding} to go…`;
-            },
-            expected,
-            counts.total || null,
-        );
+        const remote = expected && await setViewedRemotely(expected, true, progress);
+        if (remote) {
+            finishRemotely(remote, 'marked', remote.touched);
+            return;
+        }
 
-        state.marked = touched;
-        console.log('[mark-tests-viewed] marked as viewed:', touched);
+        const { touched, missed } = await sweep(true, isTestPath, progress, expected, counts.total || null);
+        const lost = expected ? await unsaved(touched, true) : [];
+
+        state.marked = touched.filter((path) => !lost.includes(path));
+        console.log('[mark-tests-viewed] marked as viewed:', state.marked);
         setBusy(false);
 
-        const notes = [`${touched.length} marked`];
+        const notes = [`${state.marked.length} marked`];
         if (state.cancelled) {
             notes.push('stopped');
         }
         if (missed) {
             notes.push(`${missed} never rendered`);
+        }
+        if (lost.length) {
+            notes.push(`${lost.length} not saved by GitHub`);
         }
         state.resultPending = tally().pending;
         state.resultText = notes.join(' · ');
@@ -1272,24 +1665,29 @@
     async function undoRun() {
         const previous = new Set(state.marked);
 
+        const progress = (count) => {
+            elements.status.textContent = `unmarked ${count}…`;
+        };
+
         state.cancelled = false;
         state.resultText = '';
         setBusy(true);
 
-        const { touched } = await sweep(
-            false,
-            (path) => previous.has(path),
-            (count) => {
-                elements.status.textContent = `unmarked ${count}…`;
-            },
-            previous,
-            null,
-        );
+        const remote = await setViewedRemotely(previous, false, progress);
+        if (remote) {
+            const undone = new Set(remote.touched);
+            finishRemotely(remote, 'unmarked', [...previous].filter((path) => !undone.has(path)));
+            return;
+        }
 
-        state.marked = [];
+        const { touched } = await sweep(false, (path) => previous.has(path), progress, previous, null);
+        const lost = prCache().files ? await unsaved(touched, false) : [];
+
+        state.marked = lost;
         setBusy(false);
         state.resultPending = tally().pending;
-        state.resultText = `${touched.length} unmarked`;
+        state.resultText = `${touched.length - lost.length} unmarked`
+            + (lost.length ? ` · ${lost.length} not saved by GitHub` : '');
         elements.status.textContent = state.resultText;
     }
 
@@ -1312,9 +1710,7 @@
             startedAt = Date.now();
         }
 
-        if (payloadCache.pr && !location.pathname.includes(`/pull/${payloadCache.pr}/`)) {
-            payloadCache = { pr: null, files: null, paths: null };
-        }
+        prCache();
 
         if (!onDiffPage()) {
             document.getElementById(PANEL_ID)?.remove();
@@ -1331,6 +1727,10 @@
             document.getElementById(PANEL_ID)?.remove();
             const built = buildPanel();
             elements = built.placement === null ? null : built;
+
+            if (elements) {
+                restoreRun();
+            }
         }
 
         refreshCount();
