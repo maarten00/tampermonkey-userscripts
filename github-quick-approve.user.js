@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub: quick approve
 // @namespace    https://github.com/maarten00
-// @version      2.2.0
+// @version      2.3.0
 // @description  Adds an Approve button to every tab of a pull request. One click approves it, without opening the review dialog yourself.
 // @author       maarten00
 // @license      MIT
@@ -26,21 +26,23 @@
      * on the stable part of the name or on the form's own field names.
      * ------------------------------------------------------------------ */
 
-    // The "Submit review" / "Submit comments" button in the Files changed header.
+    // The "Submit review" button. The new pull request page keeps it in the
+    // sticky header of every tab; the classic page only on Files changed.
     const REVIEW_BUTTON = '[class*="ReviewMenuButton"]';
     const APPROVE_RADIO = 'input[name="reviewEvent"][value="approve"]';
     const DIALOG = '[role="dialog"]';
-    // The title row's actions (View status, Code), present on every tab.
+    // The classic page's title row actions (View status, Code), where the
+    // button goes on tabs without a review button.
     const HEADER_ACTIONS = '[class*="PageHeader-Actions"]';
-    const TAB_NAV = 'nav[aria-label="Pull request navigation"]';
-    // "<author> wants to merge …", under the title on every tab; the author is
-    // the first link in it.
-    const AUTHOR_LINK = '[class*="PullRequestHeaderSummary"] a';
-    // The Conversation tab's sidebar: one row per reviewer, an approving
-    // review marked with a check. A dismissed approval loses it.
-    const REVIEWERS = 'form.js-issue-sidebar-form[aria-label="Select reviewers"]';
-    const REVIEWER_ROW = '.flex-items-center';
-    const APPROVED_ICON = 'svg.octicon-check';
+    const TAB_NAV = 'nav[aria-label="Pull request navigation"], nav[aria-label="Pull request"]';
+    // "<author> opened …" (new page) or "<author> wants to merge …" (classic),
+    // under the title on every tab; the author is the first link in it.
+    const AUTHOR_LINK = '[class*="attribution"] a, [class*="PullRequestHeaderSummary"] a';
+    // Each reviewer's standing review, as the sidebar shows it: a dismissed
+    // approval, or one replaced by a request for changes, no longer reads
+    // as approved.
+    const REVIEWS_PATH = 'page_data/review_requests';
+    const APPROVED_STATE = 'REVIEW_STATE_APPROVED';
 
     const BUTTON_ID = 'tm-quick-approve';
     const LABEL = 'Approve';
@@ -142,11 +144,8 @@
     /* ------------------------------------------------------------------ *
      * Whether you have approved already
      *
-     * Only the Conversation tab lists reviewers, so the page is fetched from
-     * wherever you are — with your own session, no token — and its sidebar
-     * read. That sidebar shows each reviewer's standing review, so an approval
-     * that was dismissed no longer counts, and neither does one you replaced
-     * with a request for changes.
+     * The reviewers are read from the JSON GitHub's own sidebar loads, with
+     * your own session and no token, so the answer is the same on every tab.
      *
      * Until that answer is in, the button is disabled: enabling it first and
      * taking it away after the fact looks like a flicker, and a click in that
@@ -162,7 +161,7 @@
     const hasApproved = () => approval.key !== null && approval.key === pullKey() && approval.status === 'approved';
     const isChecking = () => approval.key !== null && approval.key === pullKey() && approval.status === 'checking';
 
-    /** 'approved' or 'open', or null when the sidebar could not be read. */
+    /** 'approved' or 'open', or null when the reviews could not be read. */
     async function readApproval(key) {
         const login = currentLogin();
         if (!login) {
@@ -170,19 +169,21 @@
         }
 
         try {
-            const response = await fetch(`/${key}`, { credentials: 'same-origin', headers: { Accept: 'text/html' } });
+            const response = await fetch(`/${key}/${REVIEWS_PATH}`, {
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            });
             if (!response.ok) {
                 return null;
             }
 
-            const form = new DOMParser().parseFromString(await response.text(), 'text/html').querySelector(REVIEWERS);
-            if (!form) {
+            const reviews = (await response.json())?.completedReviews;
+            if (!Array.isArray(reviews)) {
                 return null;
             }
 
-            const approved = [...form.querySelectorAll('a[href]')]
-                .filter((link) => link.getAttribute('href').toLowerCase() === `/${login}`)
-                .some((link) => link.closest(REVIEWER_ROW)?.querySelector(APPROVED_ICON) !== null);
+            const approved = reviews.some((review) => review.reviewer?.displayLogin?.toLowerCase() === login
+                && review.state === APPROVED_STATE);
 
             return approved ? 'approved' : 'open';
         } catch (error) {
@@ -227,13 +228,13 @@
     let busy = false;
 
     /**
-     * The review button only exists on the Files changed tab, so from any
-     * other tab that is where the approval happens. GitHub's own tab link is
-     * clicked rather than the address changed: the page is not reloaded, and
-     * going back afterwards is an ordinary Back.
+     * On the classic page the review button only exists on the Files changed
+     * tab, so from any other tab that is where the approval happens. GitHub's
+     * own tab link is clicked rather than the address changed: the page is not
+     * reloaded, and going back afterwards is an ordinary Back.
      */
     async function reachDiff() {
-        if (onDiffPage()) {
+        if (onDiffPage() || document.querySelector(REVIEW_BUTTON)) {
             return false;
         }
 
@@ -272,7 +273,8 @@
                 return;
             }
 
-            const review = await waitFor(() => (onDiffPage() ? document.querySelector(REVIEW_BUTTON) : null));
+            // After a move, the tab being left may still be on screen.
+            const review = await waitFor(() => (!moved || onDiffPage() ? document.querySelector(REVIEW_BUTTON) : null));
             if (!review) {
                 report('Could not approve', 'GitHub did not show its review button.');
                 return;
@@ -368,8 +370,8 @@
     }
 
     /**
-     * Where the button goes: beside the review button on the diff, where
-     * GitHub keeps it, and in the title row's actions on every other tab.
+     * Where the button goes: beside the review button wherever GitHub shows
+     * it, and in the title row's actions on the classic page's other tabs.
      * Returns the element to put it in front of, or null if the page is not
      * ready.
      */
@@ -378,9 +380,13 @@
             return null;
         }
 
+        const review = document.querySelector(REVIEW_BUTTON);
+        if (review) {
+            return { before: review, reference: review, margin: true };
+        }
+
         if (onDiffPage()) {
-            const review = document.querySelector(REVIEW_BUTTON);
-            return review ? { before: review, reference: review, margin: true } : null;
+            return null;
         }
 
         const actions = document.querySelector(HEADER_ACTIONS);
@@ -423,7 +429,13 @@
         existing?.remove();
 
         const button = createButton(anchor.reference);
-        button.style.marginRight = anchor.margin ? '8px' : '';
+
+        // The new page spaces the review button from its left neighbour with a
+        // left margin, which the button takes over; the classic page has none,
+        // so the gap goes on the right instead.
+        const reviewMargin = anchor.margin ? getComputedStyle(anchor.before).marginLeft : '0px';
+        button.style.marginLeft = reviewMargin !== '0px' ? reviewMargin : '';
+        button.style.marginRight = anchor.margin && reviewMargin === '0px' ? '8px' : '';
         anchor.before.before(button);
         render();
     }

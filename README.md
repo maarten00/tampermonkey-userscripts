@@ -154,15 +154,18 @@ them on first paint, instead of letting them flash into view and then vanish.
 
 ## GitHub: quick approve
 
-An **Approve** button on every tab of a pull request — Conversation, Commits,
-Checks and Files changed. One click approves it, with no comment. It sits next
-to GitHub's own *Submit review* button on Files changed, and in the title row
-beside *View status* and *Code* everywhere else.
+An **Approve** button on every tab of a pull request — Overview (or
+Conversation), Commits, Checks and Files changed. One click approves it, with no
+comment. It sits next to GitHub's own *Submit review* button wherever GitHub
+shows it: in the sticky header on every tab of the new pull request page, and on
+Files changed only on the classic page, where it goes in the title row beside
+*View status* and *Code* on the other tabs.
 
 It presses GitHub's own buttons: open the review dialog, pick *Approve*, submit.
-The review dialog only exists on Files changed, so from another tab the script
-first switches there — through GitHub's own tab link, so nothing reloads — and
-returns you to the tab you started on once the approval has gone through.
+On the classic page the review dialog only exists on Files changed, so from
+another tab the script first switches there — through GitHub's own tab link, so
+nothing reloads — and returns you to the tab you started on once the approval
+has gone through.
 
 The button reports back on itself: *Approving…*, then *Approved*. If GitHub does
 not let you approve — your own pull request, or a repository you cannot write
@@ -177,10 +180,11 @@ button is shown rather than hidden.
 The button starts greyed out while it checks whether you have already approved,
 then either turns on or reads *Approved*. If the check cannot be made, it turns
 on anyway. It goes by
-the reviewers list on the Conversation tab, so an approval that was dismissed —
-or that you replaced with a request for changes — does not count and the button
-comes back. That list is fetched in the background from whichever tab you are
-on, with your own session, and checked again whenever you return to the tab.
+each reviewer's standing review, as the reviewers list in the sidebar shows it,
+so an approval that was dismissed — or that you replaced with a request for
+changes — does not count and the button comes back. That list is fetched in the
+background from whichever tab you are on, with your own session, and checked
+again whenever you return to the tab.
 
 There is nothing to set up: no token, no settings, and it cannot do anything you
 could not do yourself. Text already typed into the review box goes along with
